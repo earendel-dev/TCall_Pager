@@ -54,7 +54,7 @@ const int numCtrlPins = sizeof(pins) / sizeof(pins[0]);
 // ==========================================
 // Settings & Constants
 // ==========================================
-const String DEFAULT_ADMIN_NUMBER = "+7000000000"; 
+const String DEFAULT_ADMIN_NUMBER = "+70000000000"; 
 const int MAX_LOG_ENTRIES = 50;
 const char* SMS_LOG_FILE = "/sms_log.txt";
 const char* CALL_LOG_FILE = "/calls_log.txt";
@@ -419,78 +419,93 @@ void parseIncomingSMS(int index) {
     msg.trim();
   }
 
-  // Проверка номера (последние 10 цифр)
-  if (msg.length() > 0 && sender.endsWith(currentAdmin.substring(currentAdmin.length() - 10))) {
-    msg.toUpperCase();
-    
-    if (msg.startsWith("PIN ") || msg.startsWith("#")) {
-      String cmd = msg; 
-      cmd.replace("PIN ", ""); 
-      cmd.replace("#", "");
+  if (msg.length() > 0) {
+    // Вывод мгновенного уведомления в Serial-порт
+    Serial.println("\n-----------------------------------------");
+    Serial.printf("[📩 НОВОЕ СМС] От: %s\n", sender.c_str());
+    Serial.printf("Текст: %s\n", msg.c_str());
+    Serial.println("-----------------------------------------");
+
+    // 1. ЛОГГИРУЕМ ВСЕ ВХОДЯЩИЕ СМС (от любых номеров)
+    appendToLog(SMS_LOG_FILE, "[" + currentTime + "] " + sender + ": " + msg);
+
+    // Подготовка суффикса админского номера (защита от краша, если номер < 10 цифр)
+    int adminLen = currentAdmin.length();
+    String adminSuffix = (adminLen >= 10) ? currentAdmin.substring(adminLen - 10) : currentAdmin;
+
+    // 2. ПРОВЕРЯЕМ ПРАВА АДМИНА ДЛЯ УПРАВЛЕНИЯ ПИНАМИ
+    if (sender.endsWith(adminSuffix)) {
+      msg.toUpperCase();
       
-      int sp = cmd.indexOf(" ");
-      if (sp > 0) {
-        int pinNum = cmd.substring(0, sp).toInt();
-        String act = cmd.substring(sp + 1); 
-        act.trim();
+      if (msg.startsWith("PIN ") || msg.startsWith("#")) {
+        String cmd = msg; 
+        cmd.replace("PIN ", ""); 
+        cmd.replace("#", "");
         
-        int pIdx = -1;
-        for(int i=0; i<numCtrlPins; i++) {
-          if(pins[i].pin == pinNum) pIdx = i;
-        }
+        int sp = cmd.indexOf(" ");
+        if (sp > 0) {
+          int pinNum = cmd.substring(0, sp).toInt();
+          String act = cmd.substring(sp + 1); 
+          act.trim();
+          
+          int pIdx = -1;
+          for(int i=0; i<numCtrlPins; i++) {
+            if(pins[i].pin == pinNum) pIdx = i;
+          }
 
-        if (pIdx != -1) {
-          if (act == "OFF") {
-            pins[pIdx].mode = 0; 
-            digitalWrite(pinNum, LOW);
-            sendSMS(sender, "PIN " + String(pinNum) + " is OFF");
-          } 
-          else if (act.startsWith("ON")) {
-            String params = act.substring(2); 
-            params.trim();
+          if (pIdx != -1) {
+            if (act == "OFF") {
+              pins[pIdx].mode = 0; 
+              digitalWrite(pinNum, LOW);
+              sendSMS(sender, "PIN " + String(pinNum) + " is OFF");
+            } 
+            else if (act.startsWith("ON")) {
+              String params = act.substring(2); 
+              params.trim();
 
-            if (params.length() == 0) {
-              // Просто ON — включаем навсегда
-              pins[pIdx].mode = 1; 
-              digitalWrite(pinNum, HIGH);
-              sendSMS(sender, "PIN " + String(pinNum) + " is ON CONST");
-            } else {
-              // ON с цифрами — включаем таймер
-              int sp2 = params.indexOf(" ");
-              unsigned long wM = 0, pM = 0;
-              
-              if (sp2 > 0) {
-                wM = params.substring(0, sp2).toInt();
-                pM = params.substring(sp2 + 1).toInt();
-              } else {
-                wM = params.toInt();
-              }
-
-              if (wM > 0) {
-                pins[pIdx].mode = 2;
-                pins[pIdx].workTime = wM * 60000UL;
-                pins[pIdx].pauseTime = pM * 60000UL;
-                pins[pIdx].isWorkPhase = true;
-                pins[pIdx].startTime = millis();
+              if (params.length() == 0) {
+                // Просто ON — включаем навсегда
+                pins[pIdx].mode = 1; 
                 digitalWrite(pinNum, HIGH);
-
-                // Формируем ответное SMS
-                String rep = "PIN " + String(pinNum) + " ON. Work: " + String(wM) + "min";
-                if (pM > 0) {
-                  rep += ", Pause: " + String(pM) + "min (cycle)";
+                sendSMS(sender, "PIN " + String(pinNum) + " is ON CONST");
+              } else {
+                // ON с цифрами — включаем таймер
+                int sp2 = params.indexOf(" ");
+                unsigned long wM = 0, pM = 0;
+                
+                if (sp2 > 0) {
+                  wM = params.substring(0, sp2).toInt();
+                  pM = params.substring(sp2 + 1).toInt();
                 } else {
-                  rep += ", then OFF";
+                  wM = params.toInt();
                 }
-                sendSMS(sender, rep);
+
+                if (wM > 0) {
+                  pins[pIdx].mode = 2;
+                  pins[pIdx].workTime = wM * 60000UL;
+                  pins[pIdx].pauseTime = pM * 60000UL;
+                  pins[pIdx].isWorkPhase = true;
+                  pins[pIdx].startTime = millis();
+                  digitalWrite(pinNum, HIGH);
+
+                  // Формируем ответное SMS
+                  String rep = "PIN " + String(pinNum) + " ON. Work: " + String(wM) + "min";
+                  if (pM > 0) {
+                    rep += ", Pause: " + String(pM) + "min (cycle)";
+                  } else {
+                    rep += ", then OFF";
+                  }
+                  sendSMS(sender, rep);
+                }
               }
             }
+            saveSystemState();
           }
-          saveSystemState();
         }
       }
     }
-    appendToLog(SMS_LOG_FILE, "[" + currentTime + "] " + sender + ": " + msg);
   }
+  
   sendAT("AT+CMGD=" + String(index)); // Удаляем SMS с симки
   if (uiState == MAIN_MENU) printMenu();
 }
