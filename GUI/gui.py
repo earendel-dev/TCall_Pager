@@ -1,29 +1,27 @@
 import sys
 import subprocess
+import time  # Необходим для аппаратного сброса ESP32
 
 # =====================================================================
 # БЛОК АВТОМАТИЧЕСКОЙ УСТАНОВКИ ЗАВИСИМОСТЕЙ
 # =====================================================================
 try:
     import serial
-    from PyQt6.QtWidgets import QApplication
+    import serial.tools.list_ports
+    from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, \
+        QHBoxLayout, QComboBox, QPushButton, QTextEdit, \
+        QLineEdit, QLabel, QGroupBox, QFormLayout, QMessageBox, \
+        QSplitter, QScrollArea
+    from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
 except ModuleNotFoundError:
     print("Библиотеки не найдены. Запускаю автоматическую установку в .venv...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pyserial", "PyQt6"])
-    print("Установка завершена успешно! Перезапустите скрипт кнопкой Run.")
+    print("Установка завершена успешно! Перезапустите скрипт.")
     sys.exit(0)
 
 # =====================================================================
-# ОСНОВНОЙ КОД ПРИЛОЖЕНИЯ
+# СОВРЕМЕННЫЙ СТИЛЬ (QSS)
 # =====================================================================
-import serial.tools.list_ports
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QComboBox, QPushButton, QTextEdit,
-                             QLineEdit, QLabel, QGroupBox, QFormLayout, QMessageBox,
-                             QSplitter, QScrollArea)
-from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
-
-# --- СОВРЕМЕННЫЙ СТИЛЬ (QSS) ---
 MODERN_STYLE = """
 QWidget {
     background-color: #2b2d30;
@@ -103,6 +101,9 @@ QScrollArea {
 }
 """
 
+# =====================================================================
+# КЛАСС РАБОТЫ С COM-ПОРТОМ
+# =====================================================================
 class SerialWorker(QThread):
     data_received = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
@@ -114,7 +115,24 @@ class SerialWorker(QThread):
 
     def connect_port(self, port, baudrate):
         try:
-            self.serial_port = serial.Serial(port, baudrate, timeout=0.1)
+            # Создаем объект порта, но пока не открываем
+            self.serial_port = serial.Serial()
+            self.serial_port.port = port
+            self.serial_port.baudrate = baudrate
+            self.serial_port.timeout = 0.1
+
+            # Открываем порт
+            self.serial_port.open()
+
+            # --- АППАРАТНЫЙ СБРОС ESP32 ---
+            # Принудительно перезагружаем плату и выводим из режима прошивки
+            self.serial_port.setDTR(False)
+            self.serial_port.setRTS(True)
+            time.sleep(0.1) # Короткая пауза для сброса
+            self.serial_port.setDTR(False)
+            self.serial_port.setRTS(False)
+            # ------------------------------
+
             self.running = True
             self.start()
             return True
@@ -146,6 +164,9 @@ class SerialWorker(QThread):
             except Exception as e:
                 self.error_occurred.emit(f"Ошибка записи: {str(e)}")
 
+# =====================================================================
+# ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ
+# =====================================================================
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -227,7 +248,6 @@ class MainWindow(QMainWindow):
         gpio_layout = QFormLayout()
         gpio_layout.setVerticalSpacing(10)
 
-        # Кнопка статуса пинов вернулась!
         btn_pin_status = QPushButton("📊 Запросить состояние пинов (4)")
         btn_pin_status.clicked.connect(lambda: self.run_macro(['0', '4']))
 
@@ -256,7 +276,6 @@ class MainWindow(QMainWindow):
         btn_gpio_send.setObjectName("primary_btn")
         btn_gpio_send.clicked.connect(self.cmd_control_gpio)
 
-        # Добавляем все в Layout
         gpio_layout.addRow("", btn_pin_status)
         gpio_layout.addRow(QLabel("")) # Отступ
         gpio_layout.addRow("ПИН (PIN):", self.pin_combo)
@@ -349,8 +368,6 @@ class MainWindow(QMainWindow):
         console_layout.addLayout(input_layout)
 
         splitter.addWidget(console_widget)
-
-        # Задаем пропорции: левая панель чуть шире, правая тоже комфортная
         splitter.setSizes([500, 500])
 
     # --- ЛОГИКА ИНТЕРФЕЙСА GPIO ---
@@ -403,7 +420,7 @@ class MainWindow(QMainWindow):
             self.worker.disconnect_port()
             self.btn_connect.setText("Подключить")
             self.btn_connect.setObjectName("primary_btn")
-            self.btn_connect.setStyleSheet("") # Сброс кастомного стиля для перерисовки QSS
+            self.btn_connect.setStyleSheet("") # Сброс кастомного стиля
             self.port_combo.setEnabled(True)
             self.btn_refresh.setEnabled(True)
             self.append_console("\n--- ОТКЛЮЧЕНО ---\n")
