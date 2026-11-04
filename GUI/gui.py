@@ -1,10 +1,6 @@
 import sys
-import subprocess
 import time  # Необходим для аппаратного сброса ESP32
 
-# =====================================================================
-# БЛОК АВТОМАТИЧЕСКОЙ УСТАНОВКИ ЗАВИСИМОСТЕЙ
-# =====================================================================
 try:
     import serial
     import serial.tools.list_ports
@@ -13,11 +9,14 @@ try:
         QLineEdit, QLabel, QGroupBox, QFormLayout, QMessageBox, \
         QSplitter, QScrollArea
     from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
-except ModuleNotFoundError:
-    print("Библиотеки не найдены. Запускаю автоматическую установку в .venv...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyserial", "PyQt6"])
-    print("Установка завершена успешно! Перезапустите скрипт.")
-    sys.exit(0)
+except ModuleNotFoundError as exc:
+    missing = exc.name or "зависимости"
+    sys.stderr.write(
+        f"Не найдена библиотека: {missing}.\n"
+        "Установите зависимости командой:\n"
+        "    pip install -r requirements.txt\n"
+    )
+    sys.exit(1)
 
 # =====================================================================
 # СОВРЕМЕННЫЙ СТИЛЬ (QSS)

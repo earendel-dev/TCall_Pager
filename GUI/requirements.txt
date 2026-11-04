@@ -1,0 +1,8 @@
+# GUI-контроллер TCall Pager (Windows / Linux / macOS)
+# Установка: pip install -r requirements.txt
+
+pyserial>=3.5
+PyQt6>=6.6
+
+# Только для сборки .exe (необязательно):
+# pyinstaller>=6.0
