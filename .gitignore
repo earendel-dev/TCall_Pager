@@ -10,6 +10,8 @@ env/
 build/
 dist/
 *.manifest
+# старый spec от сборки "GUI TCall pager" (актуальный — GUI/gui.spec)
+GUI/GUI TCall pager.spec
 
 # ---- IDE ----
 .idea/
