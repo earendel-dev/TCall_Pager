@@ -1,723 +1,690 @@
-/*
- * ИНСТРУКЦИЯ ПО АКТИВАЦИИ HARDWARE FLASH ENCRYPTION (Arduino IDE / ESP-IDF)
- * 1. Hardware Flash Encryption полагается на eFuse чипа ESP32.
- * 2. Для продакшена необходимо сгенерировать ключ и прошить его в eFuse:
- *    esptool.py --port /dev/ttyUSB0 burn_key flash_encryption my_flash_key.bin
- * 3. Включить фьюз шифрования: 
- *    esptool.py --port /dev/ttyUSB0 burn_efuse FLASH_CRYPT_CNT
- * 4. Убедитесь, что используете Partition Scheme, поддерживающую NVS и LittleFS.
- * ПРИМЕЧАНИЕ: Данная процедура аппаратная и может быть необратима.
- */
-
 #include <Arduino.h>
 #include <LittleFS.h>
-#include "esp_mac.h"
-#include "mbedtls/md.h"
+#include <esp_mac.h>
+#include <esp_system.h>
+#include <mbedtls/md.h>
+#include <mbedtls/pkcs5.h>
+#include "modem.h"
 
-// ==========================================
-// ANTS MAKE AM-036 
-// LilyGO T-Call 1.3
-// ESP-32-WROVER-B and SIM800L
-// CP2104
-// ==========================================
-#define MODEM_RX            26
-#define MODEM_TX            27
-#define MODEM_PWKEY         4
-#define MODEM_RST           5
-#define MODEM_POWER_ON      23
-#define STATUS_LED          13
+// LilyGO T-Call v1.3: GPIO assignments must match the connected relay board.
+constexpr char VERSION[] = "1.1.0-rc.1";
+constexpr int MODEM_RX = 26, MODEM_TX = 27, MODEM_POWER = 23, MODEM_KEY = 4;
+constexpr uint32_t MAX_MINUTES = 10080;
+constexpr size_t MAX_USB_LINE = 4096;
+constexpr char SETTINGS[] = "/settings.txt";
+constexpr char SMS_LOG[] = "/sms_log.txt";
+constexpr char CALL_LOG[] = "/calls_log.txt";
 
-// ==========================================
-// 1. МОДУЛЬ УПРАВЛЕНИЯ ПИНАМИ (PinConfig)
-// ==========================================
-struct PinConfig {
-  int pin;
-  int mode;                 // 0-OFF, 1-ON, 2-Timer/Cycle
-  unsigned long workTime;   // ms
-  unsigned long pauseTime;  // ms
-  unsigned long startTime;  // ms
-  bool isWorkPhase;         // Текущая фаза (работа или пауза)
+struct Output {
+  uint8_t pin;
+  uint8_t mode = 0;  // 0: OFF, 1: constant ON, 2: timer/cycle.
+  uint32_t work = 0, pause = 0, started = 0;
+  bool working = false;
 };
+Output outputs[] = {{12}, {14}, {15}, {2}, {21}, {22}, {25}};
+HardwareSerial modemSerial(1);
+AsyncModem modem(modemSerial);
+bool storageReady = false, securityReady = false, modemReady = false;
+String adminNumber, passwordSalt, passwordHash;
+String signalLevel = "unknown", operatorName = "unknown", networkTime = "unknown";
+uint8_t registration = 0, authFailures = 0;
+uint32_t authLockStarted = 0;
+bool authLocked = false;
+String usbLine;
+bool discardUsbLine = false;
 
-// По умолчанию mode = 0, времена = 0
-PinConfig pins[] = {
-  {12, 0, 0, 0, 0, false},
-  {14, 0, 0, 0, 0, false},
-  {15, 0, 0, 0, 0, false},
-  {2,  0, 0, 0, 0, false},
-  {21, 0, 0, 0, 0, false},
-  {22, 0, 0, 0, 0, false},
-  {25, 0, 0, 0, 0, false}
+class UsbWriter {
+ public:
+  bool available() const { return count_ < 7; }
+  void enqueue(const String& frame) {
+    if (count_ == 8 || frame.length() > MAX_USB_LINE) return;
+    frames_[(head_ + count_) % 8] = frame + "\n";
+    ++count_;
+  }
+  void tick() {
+    if (!count_) return;
+    int capacity = Serial.availableForWrite();
+    if (capacity <= 0) return;
+    size_t length = frames_[head_].length() - offset_;
+    if (length > size_t(capacity)) length = size_t(capacity);
+    if (length > 256) length = 256;
+    offset_ += Serial.write(reinterpret_cast<const uint8_t*>(frames_[head_].c_str()) + offset_, length);
+    if (offset_ == frames_[head_].length()) {
+      frames_[head_] = ""; offset_ = 0; head_ = (head_ + 1) % 8; --count_;
+    }
+  }
+ private:
+  String frames_[8];
+  uint8_t head_ = 0, count_ = 0;
+  size_t offset_ = 0;
 };
-const int numCtrlPins = sizeof(pins) / sizeof(pins[0]);
+UsbWriter usbWriter;
 
-// ==========================================
-// Settings & Constants
-// ==========================================
-const String DEFAULT_ADMIN_NUMBER = "+70000000000"; 
-const int MAX_LOG_ENTRIES = 50;
-const char* SMS_LOG_FILE = "/sms_log.txt";
-const char* CALL_LOG_FILE = "/calls_log.txt";
-
-// ==========================================
-// Global Variables & States
-// ==========================================
-HardwareSerial SerialModem(1);
-
-enum UIState { MAIN_MENU, SEND_SMS_NUM, SEND_SMS_MSG, GPIO_MENU, ADMIN_AUTH, ADMIN_MENU, SET_ADMIN_NUM, SET_ADMIN_PASS };
-UIState uiState = MAIN_MENU;
-
-String outSmsNum = "";
-String outSmsMsg = "";
-String modemBuffer = "";
-unsigned long lastStatusUpdate = 0;
-unsigned long lastSmsCleanup = 0; 
-bool isBlinking = false;
-unsigned long blinkStart = 0;
-
-String currentSignal = "??";
-String currentOperator = "Searching...";
-String currentTime = "--:--";
-String currentAdmin = "";
-
-// Предварительные объявления
-void printMenu();
-void printGpioTable();
-void printAdminMenu();
-void sendSMS(String number, String text);
-String sendAT(String cmd, uint32_t timeout = 1000);
-void wipeModemMemory();
-void saveSystemState();
-
-// ==========================================
-// 2. МОДУЛЬ КРИПТОГРАФИИ И БЕЗОПАСНОСТИ
-// ==========================================
-String getChipMAC() {
-  uint8_t mac[6];
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  char macStr[18];
-  sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(macStr);
+String boundedUtf8(const String& text, size_t limit) {
+  if (text.length() <= limit) return text;
+  while (limit && (uint8_t(text[limit]) & 0xC0) == 0x80) --limit;
+  return text.substring(0, limit);
 }
 
-String computeSecureHash(String pass, String salt) {
-  String payload = pass + salt + getChipMAC();
-  mbedtls_md_context_t ctx;
-  mbedtls_md_init(&ctx);
-  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 0);
-  mbedtls_md_starts(&ctx);
-  mbedtls_md_update(&ctx, (const unsigned char *)payload.c_str(), payload.length());
-  unsigned char hash[32];
-  mbedtls_md_finish(&ctx, hash);
-  mbedtls_md_free(&ctx);
-  
-  String hashStr = "";
-  for(int i = 0; i < 32; i++) {
-    char hex[3];
-    sprintf(hex, "%02x", hash[i]);
-    hashStr += hex;
+String hexEncode(const String& text) {
+  constexpr char hex[] = "0123456789ABCDEF";
+  String result;
+  result.reserve(text.length() * 2);
+  for (size_t i = 0; i < text.length(); ++i) {
+    uint8_t c = uint8_t(text[i]);
+    result += hex[c >> 4];
+    result += hex[c & 15];
   }
-  return hashStr;
+  return result;
 }
 
-String generateSalt() {
-  String chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  String salt = "";
-  for(int i=0; i<16; i++) {
-    salt += chars[random(0, chars.length())];
+int hexDigit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+bool hexDecode(const String& encoded, String& decoded) {
+  if (encoded.length() % 2 || encoded.length() > 1024) return false;
+  decoded = "";
+  for (size_t i = 0; i < encoded.length(); i += 2) {
+    int high = hexDigit(encoded[i]), low = hexDigit(encoded[i + 1]);
+    if (high < 0 || low < 0 || (high == 0 && low == 0)) return false;
+    decoded += char((high << 4) | low);
   }
-  return salt;
+  return true;
 }
 
-String readFileStr(const char* path) {
-  File f = LittleFS.open(path, "r");
-  if (!f) return "";
-  String res = f.readStringUntil('\n');
-  res.trim();
-  f.close();
-  return res;
+void reply(uint32_t id, bool ok, const String& payload) {
+  usbWriter.enqueue("TCALL/1\t" + String(id) + (ok ? "\tOK\t" : "\tERR\t") + hexEncode(boundedUtf8(payload, 1800)));
 }
 
-void writeFileStr(const char* path, String data) {
-  File f = LittleFS.open(path, "w");
-  if (f) { f.println(data); f.close(); }
+void event(const String& message) {
+  usbWriter.enqueue("TCALL/1\t0\tEVENT\t" + hexEncode(boundedUtf8(message, 1800)));
 }
 
-void initSecurityAndState() {
-  if (!LittleFS.exists("/admin.txt") || !LittleFS.exists("/salt.txt")) {
-    Serial.println("\n[SYSTEM] First run: Default admin and password applied");
-    String newSalt = generateSalt();
-    writeFileStr("/salt.txt", newSalt);
-    writeFileStr("/hash.txt", computeSecureHash("000000", newSalt));
-    writeFileStr("/admin.txt", DEFAULT_ADMIN_NUMBER);
-    
-    saveSystemState();
+bool parseUnsigned(const String& text, uint32_t maximum, uint32_t& value) {
+  if (!text.length() || text.length() > 10) return false;
+  uint64_t parsed = 0;
+  for (size_t i = 0; i < text.length(); ++i) {
+    if (text[i] < '0' || text[i] > '9') return false;
+    parsed = parsed * 10 + text[i] - '0';
+    if (parsed > maximum) return false;
   }
-  
-  currentAdmin = readFileStr("/admin.txt");
+  value = uint32_t(parsed);
+  return true;
+}
 
-  File f = LittleFS.open("/pins_state.txt", "r");
-  if (f) {
-    for (int i = 0; i < numCtrlPins; i++) {
-      String line = f.readStringUntil('\n');
-      int mode = line.toInt();
-      if (mode == 1) { 
-        pins[i].mode = 1;
-        digitalWrite(pins[i].pin, HIGH);
-      } else { 
-        pins[i].mode = 0;
-        digitalWrite(pins[i].pin, LOW);
-      }
+bool validPhone(const String& text) {
+  size_t start = text.startsWith("+") ? 1 : 0;
+  if (text.length() - start < 10 || text.length() - start > 15) return false;
+  for (size_t i = start; i < text.length(); ++i) if (text[i] < '0' || text[i] > '9') return false;
+  return true;
+}
+
+bool samePhone(String left, String right) {
+  if (!validPhone(left) || !validPhone(right)) return false;
+  if (left.startsWith("+")) left.remove(0, 1);
+  if (right.startsWith("+")) right.remove(0, 1);
+  return left == right;
+}
+
+// Support BMP text explicitly instead of silently dropping unsupported emoji.
+bool utf8ToUcs2(const String& text, String& encoded, size_t& characters) {
+  encoded = "";
+  characters = 0;
+  for (size_t i = 0; i < text.length();) {
+    uint8_t first = text[i++];
+    uint32_t code = first;
+    unsigned extra = 0;
+    if (first < 128) {}
+    else if ((first & 0xE0) == 0xC0) { code = first & 31; extra = 1; }
+    else if ((first & 0xF0) == 0xE0) { code = first & 15; extra = 2; }
+    else return false;
+    if (i + extra > text.length()) return false;
+    for (unsigned n = 0; n < extra; ++n) {
+      uint8_t next = text[i++];
+      if ((next & 0xC0) != 0x80) return false;
+      code = (code << 6) | (next & 63);
     }
-    f.close();
+    if ((extra == 1 && code < 128) || (extra == 2 && code < 2048) ||
+        (code >= 0xD800 && code <= 0xDFFF) || code == 0) return false;
+    char hex[5];
+    snprintf(hex, sizeof(hex), "%04X", unsigned(code));
+    encoded += hex;
+    ++characters;
   }
+  return true;
 }
 
-void saveSystemState() {
-  File f = LittleFS.open("/pins_state.txt", "w");
-  if (f) {
-    for (int i = 0; i < numCtrlPins; i++) {
-      f.println(pins[i].mode);
+bool ucs2ToUtf8(const String& encoded, String& text) {
+  if (encoded.length() % 4 || encoded.length() > 1120) return false;
+  text = "";
+  for (size_t i = 0; i < encoded.length(); i += 4) {
+    uint16_t code = 0;
+    for (unsigned n = 0; n < 4; ++n) {
+      int digit = hexDigit(encoded[i + n]);
+      if (digit < 0) return false;
+      code = (code << 4) | digit;
     }
-    f.close();
-  }
-}
-
-// ==========================================
-// 3. ОБНОВЛЕНИЕ АППАРАТНЫХ ТАЙМЕРОВ
-// ==========================================
-void updateHardwareStates() {
-  unsigned long currentMillis = millis();
-  for (int i = 0; i < numCtrlPins; i++) {
-    if (pins[i].mode == 2) {
-      unsigned long elapsed = currentMillis - pins[i].startTime;
-      if (pins[i].isWorkPhase) {
-        if (elapsed >= pins[i].workTime) {
-          digitalWrite(pins[i].pin, LOW);
-          pins[i].isWorkPhase = false;
-          pins[i].startTime = currentMillis;
-          if (pins[i].pauseTime == 0) {
-            pins[i].mode = 0;
-            saveSystemState();
-          }
-        }
-      } else {
-        if (elapsed >= pins[i].pauseTime && pins[i].pauseTime > 0) {
-          digitalWrite(pins[i].pin, HIGH);
-          pins[i].isWorkPhase = true;
-          pins[i].startTime = currentMillis;
-        }
-      }
-    }
-  }
-}
-
-// ==========================================
-// 4. ОРИГИНАЛЬНЫЙ ФУНКЦИОНАЛ: Память & UCS2
-// ==========================================
-int getSimSmsCount() {
-  String resp = sendAT("AT+CPMS?", 1000);
-  int idx1 = resp.indexOf("\"SM\",");
-  if (idx1 != -1) {
-    idx1 += 5;
-    int idx2 = resp.indexOf(",", idx1);
-    if (idx2 != -1) return resp.substring(idx1, idx2).toInt();
-  }
-  return 0;
-}
-
-void deleteOldSms() {
-  int simCount = getSimSmsCount();
-  if (simCount > 30) {
-    Serial.printf("\n[!] На SIM %d SMS (> 30). Удаляем 20 старых...\n", simCount);
-    for (int i = 1; i <= 20; i++) {
-      SerialModem.print("AT+CMGD="); SerialModem.println(i); delay(50);
-    }
-    Serial.println("[OK] Очистка SIM завершена.");
-  }
-}
-
-void wipeModemMemory() {
-  Serial.println("\n[!] Полная очистка физической памяти SIM-карты и модема...");
-  sendAT("AT+CPMS=\"SM\",\"SM\",\"SM\""); sendAT("AT+CMGD=1,4");
-  sendAT("AT+CPMS=\"ME\",\"ME\",\"ME\""); sendAT("AT+CMGD=1,4");
-  const char* callLogs[] = {"MC", "RC", "DC"};
-  for (int i = 0; i < 3; i++) {
-    sendAT("AT+CPBS=\"" + String(callLogs[i]) + "\"");
-    for (int j = 1; j <= 20; j++) { SerialModem.print("AT+CPBW="); SerialModem.println(j); delay(40); }
-  }
-  sendAT("AT+CPBS=\"SM\""); sendAT("AT+CPMS=\"SM\",\"SM\",\"SM\"");
-  Serial.println("[OK] Память SIM-карты абсолютно чиста.");
-}
-
-// ОРИГИНАЛЬНЫЕ КОНВЕРТЕРЫ 1:1
-String utf8ToUcs2(String utf8Str) {
-  String ucs2 = "";
-  for (int i = 0; i < utf8Str.length();) {
-    uint32_t codePoint = 0; uint8_t c = utf8Str[i];
-    if (c <= 0x7F) { codePoint = c; i++; } 
-    else if ((c & 0xE0) == 0xC0) { codePoint = ((c & 0x1F) << 6) | (utf8Str[i + 1] & 0x3F); i += 2; } 
-    else if ((c & 0xF0) == 0xE0) { codePoint = ((c & 0x0F) << 12) | ((utf8Str[i + 1] & 0x3F) << 6) | (utf8Str[i + 2] & 0x3F); i += 3; } 
-    else { i++; continue; }
-    char hex[5]; sprintf(hex, "%04X", codePoint); ucs2 += String(hex);
-  }
-  return ucs2;
-}
-
-String ucs2ToUtf8(String ucs2Hex) {
-  String utf8 = "";
-  for (int i = 0; i < ucs2Hex.length(); i += 4) {
-    if (i + 4 > ucs2Hex.length()) break;
-    String hexChar = ucs2Hex.substring(i, i + 4);
-    uint16_t codePoint = (uint16_t)strtol(hexChar.c_str(), NULL, 16);
-    if (codePoint <= 0x7F) { utf8 += (char)codePoint; } 
-    else if (codePoint <= 0x7FF) { utf8 += (char)(0xC0 | ((codePoint >> 6) & 0x1F)); utf8 += (char)(0x80 | (codePoint & 0x3F)); } 
-    else { utf8 += (char)(0xE0 | ((codePoint >> 12) & 0x0F)); utf8 += (char)(0x80 | ((codePoint >> 6) & 0x3F)); utf8 += (char)(0x80 | (codePoint & 0x3F)); }
-  }
-  return utf8;
-}
-
-// ==========================================
-// LittleFS Buffer Logic
-// ==========================================
-int countLines(const char* filename) {
-  File f = LittleFS.open(filename, "r");
-  if (!f) return 0;
-  int lines = 0;
-  while (f.available()) { if (f.read() == '\n') lines++; }
-  f.close(); return lines;
-}
-
-void appendToLog(const char* filename, String entry) {
-  if (countLines(filename) > 45) {
-    File f = LittleFS.open(filename, "r");
-    String tempStr = ""; int skipped = 0;
-    while (f.available()) {
-      String line = f.readStringUntil('\n'); line.trim();
-      if (line.length() == 0) continue; 
-      if (skipped < 20) { skipped++; continue; }
-      tempStr += line + "\n";
-    }
-    f.close();
-    f = LittleFS.open(filename, "w"); f.print(tempStr); f.close();
-  }
-  File f = LittleFS.open(filename, "a");
-  if (f) { entry.trim(); f.println(entry); f.close(); }
-}
-
-void printLog(const char* filename) {
-  File f = LittleFS.open(filename, "r");
-  if (!f) { Serial.println("Log is empty."); return; }
-  String lines[MAX_LOG_ENTRIES + 5]; int count = 0;
-  while (f.available() && count < (MAX_LOG_ENTRIES + 5)) {
-    String line = f.readStringUntil('\n'); line.trim();
-    if (line.length() > 0) lines[count++] = line;
-  }
-  f.close();
-  for (int i = count - 1; i >= 0; i--) Serial.println(lines[i]);
-}
-
-// ==========================================
-// Modem Base Functions
-// ==========================================
-String sendAT(String cmd, uint32_t timeout) {
-  SerialModem.println(cmd);
-  long start = millis(); String resp = "";
-  while (millis() - start < timeout) { while (SerialModem.available()) { resp += (char)SerialModem.read(); } }
-  return resp;
-}
-
-void sendSMS(String number, String text) {
-  Serial.println("\n[SMS] Отправка на номер: " + number + " ...");
-  SerialModem.print("AT+CMGS=\""); SerialModem.print(utf8ToUcs2(number)); SerialModem.println("\"");
-  delay(1000); SerialModem.print(utf8ToUcs2(text)); delay(500); SerialModem.write(26); 
-  
-  long start = millis(); String resp = "";
-  while (millis() - start < 10000) {
-    while (SerialModem.available()) { resp += (char)SerialModem.read(); }
-    if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) break;
-  }
-  if (resp.indexOf("OK") != -1) Serial.println("[SMS] Сообщение УСПЕШНО отправлено!");
-  else Serial.println("[SMS] ОШИБКА при отправке: " + resp);
-}
-
-// ВОЗВРАЩЕНА ОРИГИНАЛЬНАЯ ЛОГИКА ЗАПУСКА С ОЖИДАНИЕМ СЕТИ
-void initModem() {
-  Serial.print("Booting SIM800L...");
-  pinMode(MODEM_POWER_ON, OUTPUT); digitalWrite(MODEM_POWER_ON, HIGH);
-  pinMode(MODEM_PWKEY, OUTPUT); digitalWrite(MODEM_PWKEY, LOW);
-  delay(1200); digitalWrite(MODEM_PWKEY, HIGH); delay(3000);
-  
-  SerialModem.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
-  while (sendAT("AT", 500).indexOf("OK") == -1) { Serial.print("."); delay(500); }
-  Serial.println(" OK!");
-  
-  Serial.print("Waiting for Network...");
-  while (true) {
-    String creg = sendAT("AT+CREG?");
-    if (creg.indexOf(",1") != -1 || creg.indexOf(",5") != -1) break;
-    Serial.print("."); delay(1000);
-  }
-  Serial.println(" Registered!");
-  
-  String cops = "";
-  while ((cops = sendAT("AT+COPS?")).indexOf(",\"") == -1) { delay(1000); }
-  int opStart = cops.indexOf(",\"") + 2;
-  int opEnd = cops.indexOf("\"", opStart);
-  currentOperator = cops.substring(opStart, opEnd);
-
-  sendAT("AT+CLTS=1"); 
-  
-  Serial.print("Waiting for Signal...");
-  while (currentSignal == "??" || currentSignal == "0" || currentSignal == "99") {
-    String csq = sendAT("AT+CSQ");
-    int i1 = csq.indexOf(":") + 1;
-    int i2 = csq.indexOf(",");
-    if (i1 > 0 && i2 > 0) currentSignal = csq.substring(i1, i2);
-    currentSignal.trim();
-    delay(1000); Serial.print(".");
-  }
-  Serial.println(" OK!");
-
-  Serial.print("Syncing Network Time...");
-  while (currentTime == "--:--") {
-    String cclk = sendAT("AT+CCLK?");
-    int t1 = cclk.indexOf(",") + 1;
-    if (t1 > 0) {
-      String t = cclk.substring(t1, t1 + 5);
-      if (t.indexOf(":") != -1 && t.indexOf("00:00") == -1) { currentTime = t; break; }
-    }
-    delay(2000); Serial.print(".");
-  }
-  Serial.println(" OK!");
-  
-  sendAT("AT+CSCS=\"UCS2\"");      
-  sendAT("AT+CSMP=17,167,0,8");  
-  sendAT("AT+CMGF=1");            
-  sendAT("AT+CNMI=2,1,0,0,0");   
-  sendAT("AT+CLIP=1");           
-
-  wipeModemMemory();
-}
-
-void triggerEventNotification() {
-  isBlinking = true; blinkStart = millis(); digitalWrite(STATUS_LED, HIGH);
-}
-
-// ==========================================
-// 5. ГИБРИДНЫЙ ПАРСИНГ SMS (Оригинальная логика UCS2)
-// ==========================================
-void parseIncomingSMS(int index) {
-  String resp = sendAT("AT+CMGR=" + String(index), 2000);
-  int nS = resp.indexOf(",\"") + 2; if (nS < 2) return;
-  String sender = ucs2ToUtf8(resp.substring(nS, resp.indexOf("\"", nS)));
-  
-  int hE = resp.indexOf("\n", resp.indexOf("+CMGR:"));
-  String msg = "";
-  if (hE != -1) {
-    msg = ucs2ToUtf8(resp.substring(hE + 1, resp.lastIndexOf("\r\nOK")));
-    msg.trim();
-  }
-
-  if (msg.length() > 0) {
-    // Вывод мгновенного уведомления в Serial-порт
-    Serial.println("\n-----------------------------------------");
-    Serial.printf("[📩 НОВОЕ СМС] От: %s\n", sender.c_str());
-    Serial.printf("Текст: %s\n", msg.c_str());
-    Serial.println("-----------------------------------------");
-
-    // 1. ЛОГГИРУЕМ ВСЕ ВХОДЯЩИЕ СМС (от любых номеров)
-    appendToLog(SMS_LOG_FILE, "[" + currentTime + "] " + sender + ": " + msg);
-
-    // Подготовка суффикса админского номера (защита от краша, если номер < 10 цифр)
-    int adminLen = currentAdmin.length();
-    String adminSuffix = (adminLen >= 10) ? currentAdmin.substring(adminLen - 10) : currentAdmin;
-
-    // 2. ПРОВЕРЯЕМ ПРАВА АДМИНА ДЛЯ УПРАВЛЕНИЯ ПИНАМИ
-    if (sender.endsWith(adminSuffix)) {
-      msg.toUpperCase();
-      
-      if (msg.startsWith("PIN ") || msg.startsWith("#")) {
-        String cmd = msg; 
-        cmd.replace("PIN ", ""); 
-        cmd.replace("#", "");
-        
-        int sp = cmd.indexOf(" ");
-        if (sp > 0) {
-          int pinNum = cmd.substring(0, sp).toInt();
-          String act = cmd.substring(sp + 1); 
-          act.trim();
-          
-          int pIdx = -1;
-          for(int i=0; i<numCtrlPins; i++) {
-            if(pins[i].pin == pinNum) pIdx = i;
-          }
-
-          if (pIdx != -1) {
-            if (act == "OFF") {
-              pins[pIdx].mode = 0; 
-              digitalWrite(pinNum, LOW);
-              sendSMS(sender, "PIN " + String(pinNum) + " is OFF");
-            } 
-            else if (act.startsWith("ON")) {
-              String params = act.substring(2); 
-              params.trim();
-
-              if (params.length() == 0) {
-                // Просто ON — включаем навсегда
-                pins[pIdx].mode = 1; 
-                digitalWrite(pinNum, HIGH);
-                sendSMS(sender, "PIN " + String(pinNum) + " is ON CONST");
-              } else {
-                // ON с цифрами — включаем таймер
-                int sp2 = params.indexOf(" ");
-                unsigned long wM = 0, pM = 0;
-                
-                if (sp2 > 0) {
-                  wM = params.substring(0, sp2).toInt();
-                  pM = params.substring(sp2 + 1).toInt();
-                } else {
-                  wM = params.toInt();
-                }
-
-                if (wM > 0) {
-                  pins[pIdx].mode = 2;
-                  pins[pIdx].workTime = wM * 60000UL;
-                  pins[pIdx].pauseTime = pM * 60000UL;
-                  pins[pIdx].isWorkPhase = true;
-                  pins[pIdx].startTime = millis();
-                  digitalWrite(pinNum, HIGH);
-
-                  // Формируем ответное SMS
-                  String rep = "PIN " + String(pinNum) + " ON. Work: " + String(wM) + "min";
-                  if (pM > 0) {
-                    rep += ", Pause: " + String(pM) + "min (cycle)";
-                  } else {
-                    rep += ", then OFF";
-                  }
-                  sendSMS(sender, rep);
-                }
-              }
-            }
-            saveSystemState();
-          }
-        }
-      }
-    }
-  }
-  
-  sendAT("AT+CMGD=" + String(index)); // Удаляем SMS с симки
-  if (uiState == MAIN_MENU) printMenu();
-}
-
-// ==========================================
-// 6. ЛОКАЛЬНЫЙ ИНТЕРФЕЙС (Serial UI)
-// ==========================================
-void safeResetState() {
-  for (int i = 0; i < numCtrlPins; i++) {
-    pins[i].mode = 0;
-    digitalWrite(pins[i].pin, LOW);
-  }
-  saveSystemState();
-  Serial.println("\n[!] SAFE RESET: Все пины выключены.");
-}
-
-void printGpioTable() {
-  Serial.println("\n----------------------------- GPIO STATUS -----------------------------");
-  Serial.println("| PIN | STATUS | MODE  | WORK TIME (remain) | PAUSE TIME (remain) |");
-  Serial.println("|-----|--------|-------|--------------------|---------------------|");
-  for (int i = 0; i < numCtrlPins; i++) {
-    String state = (digitalRead(pins[i].pin) == HIGH) ? " ON " : " OFF";
-    String modeStr = pins[i].mode == 0 ? "  0  " : (pins[i].mode == 1 ? "CONST" : "TIMER");
-    
-    char workBuf[32] = "0";
-    char pauseBuf[32] = "0";
-
-    if (pins[i].mode == 2) {
-       unsigned long wRem = pins[i].isWorkPhase ? (pins[i].workTime - (millis() - pins[i].startTime)) : pins[i].workTime;
-       unsigned long pRem = !pins[i].isWorkPhase ? (pins[i].pauseTime - (millis() - pins[i].startTime)) : pins[i].pauseTime;
-       
-       String wStr = String(wRem / 60000) + "m " + String((wRem % 60000)/1000) + "s";
-       String pStr = String(pRem / 60000) + "m " + String((pRem % 60000)/1000) + "s";
-       
-       sprintf(workBuf, "%-18s", wStr.c_str());
-       sprintf(pauseBuf, "%-19s", pStr.c_str());
+    if (code == 0 || (code >= 0xD800 && code <= 0xDFFF)) return false;
+    if (code < 128) text += char(code);
+    else if (code < 2048) {
+      text += char(0xC0 | (code >> 6)); text += char(0x80 | (code & 63));
     } else {
-       sprintf(workBuf, "%-18s", "---");
-       sprintf(pauseBuf, "%-19s", "---");
+      text += char(0xE0 | (code >> 12)); text += char(0x80 | ((code >> 6) & 63)); text += char(0x80 | (code & 63));
     }
-
-    Serial.printf("| %2d  |  %s  | %s | %s | %s |\n", pins[i].pin, state.c_str(), modeStr.c_str(), workBuf, pauseBuf);
   }
-  Serial.println("-----------------------------------------------------------------------");
-  Serial.println("[ОПИСАНИЕ КОЛОНОК]");
-  Serial.println(" - PIN       : Номер контакта (GPIO ESP32)");
-  Serial.println(" - STATUS    : Текущее физическое состояние реле (ON / OFF)");
-  Serial.println(" - MODE      : 0 (Выключено), CONST (Включено постоянно), TIMER (По таймеру)");
-  Serial.println(" - WORK TIME : Время работы (мин:сек) - 0 по умолчанию, если не задано");
-  Serial.println(" - PAUSE TIME: Время паузы (мин:сек)  - 0 по умолчанию, если не задано");
-  Serial.println("-----------------------------------------------------------------------");
-  Serial.println("Enter PIN to toggle CONST_ON/OFF or '0' to back:");
+  return true;
 }
 
-void printMenu() {
-  Serial.println("\n=================================");
-  Serial.printf("[📶 %s] [🕒 %s] [📩 SMS: %d] [📞 CALLS: %d]\n", 
-    currentSignal.c_str(), currentTime.c_str(), countLines(SMS_LOG_FILE), countLines(CALL_LOG_FILE));
-  Serial.println("=================================");
-  Serial.println("1. Read SMS Log");
-  Serial.println("2. Read Call History");
-  Serial.println("3. Send SMS");
-  Serial.println("4. GPIO Control");
-  Serial.println("5. Wipe Logs & SIM Memory");
-  Serial.println("6. Admin Setup (Auth Required)");
-  Serial.println("=================================");
-  Serial.print("Select: ");
+String readLineFile(const char* path) {
+  File file = LittleFS.open(path, "r");
+  if (!file) return "";
+  String value = file.readStringUntil('\n');
+  value.trim();
+  return value;
 }
 
-void printAdminMenu() {
-  Serial.println("\n------- ADMIN SETUP -------");
-  Serial.println("1. Change Admin Number");
-  Serial.println("2. Change Password");
-  Serial.println("3. SAFE RESET (Pins OFF)");
-  Serial.println("0. Back to Main Menu");
-  Serial.print("Select: ");
+bool atomicWrite(const char* path, const String& content) {
+  if (!storageReady) return false;
+  String temporary = String(path) + ".tmp";
+  File file = LittleFS.open(temporary, "w");
+  if (!file) return false;
+  bool ok = file.print(content) == content.length();
+  file.flush();
+  ok = ok && !file.getWriteError();
+  file.close();
+  return ok && LittleFS.rename(temporary, path);
 }
 
-void handleSerialUI() {
-  if (!Serial.available()) return;
-  String input = Serial.readStringUntil('\n'); input.trim();
-  if (input.length() == 0) return;
+String chipMac() {
+  uint8_t bytes[6];
+  esp_read_mac(bytes, ESP_MAC_WIFI_STA);
+  char formatted[18];
+  snprintf(formatted, sizeof(formatted), "%02X:%02X:%02X:%02X:%02X:%02X",
+           bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
+  return String(formatted);
+}
 
-  if (input == "0" && uiState != ADMIN_AUTH) { uiState = MAIN_MENU; printMenu(); return; }
+String newSalt() {
+  uint8_t bytes[16];
+  esp_fill_random(bytes, sizeof(bytes));
+  String result;
+  for (uint8_t value : bytes) {
+    char hex[3]; snprintf(hex, sizeof(hex), "%02x", value); result += hex;
+  }
+  return result;
+}
 
-  switch (uiState) {
-    case MAIN_MENU:
-      if (input == "1") { Serial.println("\n--- SMS Log ---"); printLog(SMS_LOG_FILE); }
-      else if (input == "2") { Serial.println("\n--- Call Log ---"); printLog(CALL_LOG_FILE); }
-      else if (input == "3") { uiState = SEND_SMS_NUM; Serial.print("\nEnter Destination Number: "); }
-      else if (input == "4") { uiState = GPIO_MENU; printGpioTable(); }
-      else if (input == "5") { LittleFS.format(); wipeModemMemory(); initSecurityAndState(); Serial.println("\n[DONE] Все логи и SIM очищены."); }
-      else if (input == "6") { uiState = ADMIN_AUTH; Serial.print("\nEnter Password: "); return; }
-      if (uiState == MAIN_MENU) printMenu();
-      break;
+String hashPassword(const String& password, const String& salt, bool legacy) {
+  unsigned char digest[32];
+  String material = salt + chipMac();
+  int error;
+  if (legacy) {
+    String input = password + material;
+    error = mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+                       reinterpret_cast<const unsigned char*>(input.c_str()), input.length(), digest);
+  } else {
+    error = mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA256,
+        reinterpret_cast<const unsigned char*>(password.c_str()), password.length(),
+        reinterpret_cast<const unsigned char*>(material.c_str()), material.length(), 20000, sizeof(digest), digest);
+  }
+  if (error) return "";
+  String result = legacy ? "" : "pbkdf2:";
+  for (uint8_t value : digest) {
+    char hex[3]; snprintf(hex, sizeof(hex), "%02x", value); result += hex;
+  }
+  return result;
+}
 
-    case SEND_SMS_NUM: outSmsNum = input; uiState = SEND_SMS_MSG; Serial.print("Enter Message: "); break;
-    case SEND_SMS_MSG: outSmsMsg = input; sendSMS(outSmsNum, outSmsMsg); uiState = MAIN_MENU; printMenu(); break;
+bool saveSettings(const String& number, const String& salt, const String& hash) {
+  return atomicWrite(SETTINGS, "TCALL2\n" + number + "\n" + salt + "\n" + hash + "\n");
+}
 
-    case GPIO_MENU: {
-        int targetPin = input.toInt();
-        for(int i = 0; i < numCtrlPins; i++) {
-          if(pins[i].pin == targetPin) {
-            pins[i].mode = (pins[i].mode == 1) ? 0 : 1; 
-            digitalWrite(pins[i].pin, pins[i].mode == 1 ? HIGH : LOW);
-            saveSystemState();
-          }
-        }
-        printGpioTable();
-      } break;
+bool authenticate(const String& password) {
+  if (authLocked && uint32_t(millis() - authLockStarted) >= 30000) authLocked = false;
+  if (!securityReady || !password.length() || password.length() > 256 || authLocked) return false;
+  String expected = hashPassword(password, passwordSalt, !passwordHash.startsWith("pbkdf2:"));
+  if (!expected.length() || expected.length() != passwordHash.length()) return false;
+  uint8_t difference = 0;
+  for (size_t i = 0; i < expected.length(); ++i) difference |= uint8_t(expected[i] ^ passwordHash[i]);
+  if (difference) {
+    if (++authFailures >= 5) { authLockStarted = millis(); authLocked = true; authFailures = 0; }
+    return false;
+  }
+  authFailures = 0;
+  return true;
+}
 
-    case ADMIN_AUTH: {
-        String savedSalt = readFileStr("/salt.txt");
-        String savedHash = readFileStr("/hash.txt");
-        if (computeSecureHash(input, savedSalt) == savedHash) {
-          Serial.println("\n[AUTH SUCCESS]"); uiState = ADMIN_MENU; printAdminMenu();
-        } else {
-          Serial.println("\n[AUTH FAILED] Wrong password."); uiState = MAIN_MENU; printMenu();
-        }
-      } break;
+bool saveOutputs() {
+  String content;
+  // A reboot cancels timers; only explicit constant-ON settings are restored.
+  for (const auto& output : outputs) content += String(output.mode == 1 ? 1 : 0) + "\n";
+  return atomicWrite("/pins_state.txt", content);
+}
 
-    case ADMIN_MENU:
-      if (input == "1") { uiState = SET_ADMIN_NUM; Serial.print("Enter New Admin Number (+...): "); }
-      else if (input == "2") { uiState = SET_ADMIN_PASS; Serial.print("Enter New Password: "); }
-      else if (input == "3") { safeResetState(); printAdminMenu(); }
-      break;
-
-    case SET_ADMIN_NUM:
-      currentAdmin = input; writeFileStr("/admin.txt", currentAdmin);
-      Serial.println("\n[OK] Admin number updated."); uiState = ADMIN_MENU; printAdminMenu(); break;
-
-    case SET_ADMIN_PASS: {
-        String newSalt = generateSalt();
-        writeFileStr("/salt.txt", newSalt);
-        writeFileStr("/hash.txt", computeSecureHash(input, newSalt));
-        Serial.println("\n[OK] Password updated."); uiState = ADMIN_MENU; printAdminMenu();
-      } break;
+void loadState() {
+  if (!storageReady) return;
+  if (LittleFS.exists(SETTINGS)) {
+    File file = LittleFS.open(SETTINGS, "r");
+    if (!file || file.readStringUntil('\n') != "TCALL2") return;
+    adminNumber = file.readStringUntil('\n'); adminNumber.trim();
+    passwordSalt = file.readStringUntil('\n'); passwordSalt.trim();
+    passwordHash = file.readStringUntil('\n'); passwordHash.trim();
+  } else if (LittleFS.exists("/admin.txt") || LittleFS.exists("/salt.txt") || LittleFS.exists("/hash.txt")) {
+    // Import the original credential files without resetting a partial or damaged installation.
+    adminNumber = readLineFile("/admin.txt");
+    passwordSalt = readLineFile("/salt.txt");
+    passwordHash = readLineFile("/hash.txt");
+  } else {
+    adminNumber = "+70000000000";
+    passwordSalt = newSalt();
+    passwordHash = hashPassword("000000", passwordSalt, false);
+    if (!passwordHash.length() || !saveSettings(adminNumber, passwordSalt, passwordHash)) return;
+  }
+  securityReady = validPhone(adminNumber) && passwordSalt.length() >= 16 &&
+      (passwordHash.length() == 64 || (passwordHash.startsWith("pbkdf2:") && passwordHash.length() == 71));
+  if (!securityReady) return;
+  File file = LittleFS.open("/pins_state.txt", "r");
+  if (!file) return;
+  for (auto& output : outputs) {
+    String state = file.readStringUntil('\n'); state.trim();
+    output.mode = state == "1" ? 1 : 0;
+    digitalWrite(output.pin, output.mode == 1 ? HIGH : LOW);
   }
 }
 
-// ==========================================
-// Main Loops
-// ==========================================
-void handleModemAsync() {
-  while (SerialModem.available()) {
-    char c = SerialModem.read(); modemBuffer += c;
-    if (c == '\n') {
-      if (modemBuffer.indexOf("+CMTI:") != -1) {
-        int index = modemBuffer.substring(modemBuffer.indexOf(",") + 1).toInt();
-        triggerEventNotification(); parseIncomingSMS(index);
-      } 
-      else if (modemBuffer.indexOf("+CLIP:") != -1) {
-        int start = modemBuffer.indexOf("\"") + 1;
-        String number = modemBuffer.substring(start, modemBuffer.indexOf("\"", start));
-        triggerEventNotification();
-        Serial.println("\n[📞 ВХОДЯЩИЙ ЗВОНОК] От: " + number);
-        appendToLog(CALL_LOG_FILE, "[" + currentTime + "] Rejected: " + number);
-        sendAT("ATH"); 
-        
-        sendAT("AT+CPBS=\"RC\""); sendAT("AT+CMGD=1,4"); 
-        sendAT("AT+CPBS=\"MC\""); sendAT("AT+CMGD=1,4"); 
-        sendAT("AT+CPBS=\"SM\"");
-        
-        if (uiState == MAIN_MENU) printMenu();
+String logSafe(String text) {
+  text.replace("\r", " "); text.replace("\n", " "); text.replace("\t", " ");
+  if (text.length() > 150) {
+    size_t end = 150;
+    while (end && (uint8_t(text[end]) & 0xC0) == 0x80) --end;
+    text = text.substring(0, end);
+  }
+  return text;
+}
+
+bool appendLog(const char* path, const String& text) {
+  if (!storageReady) return false;
+  File file = LittleFS.open(path, "r");
+  String lines[50];
+  size_t count = 0;
+  while (file && file.available()) {
+    String line = file.readStringUntil('\n'); line.trim();
+    if (!line.length()) continue;
+    if (count == 50) {
+      for (size_t i = 1; i < 50; ++i) lines[i - 1] = lines[i];
+      --count;
+    }
+    lines[count++] = logSafe(line);
+  }
+  file.close();
+  String content;
+  size_t first = count == 50 ? 1 : 0;
+  for (size_t i = first; i < count; ++i) content += lines[i] + "\n";
+  content += logSafe(text) + "\n";
+  return atomicWrite(path, content);
+}
+
+String recentLog(const char* path) {
+  File file = LittleFS.open(path, "r");
+  String lines[10]; size_t total = 0;
+  while (file && file.available()) {
+    String line = file.readStringUntil('\n'); line.trim();
+    if (line.length()) lines[total++ % 10] = logSafe(line);
+  }
+  String content = "Latest 10 entries (maximum 50 retained):\n";
+  size_t start = total > 10 ? total - 10 : 0;
+  for (size_t i = start; i < total; ++i) content += lines[i % 10] + "\n";
+  return content;
+}
+
+void updateOutputs() {
+  uint32_t now = millis();
+  for (auto& output : outputs) {
+    if (output.mode != 2) continue;
+    uint32_t duration = output.working ? output.work : output.pause;
+    if (uint32_t(now - output.started) < duration) continue;
+    output.started = now;
+    output.working = !output.working;
+    if (!output.working && output.pause == 0) output.mode = 0;
+    digitalWrite(output.pin, output.working ? HIGH : LOW);
+  }
+}
+
+bool configureOutput(const String& pinText, const String& mode, const String& workText,
+                     const String& pauseText, String& error) {
+  uint32_t pin, work, pause;
+  if (!storageReady || !securityReady) { error = "Storage or credentials unavailable."; return false; }
+  if (!parseUnsigned(pinText, 39, pin) || !parseUnsigned(workText, MAX_MINUTES, work) ||
+      !parseUnsigned(pauseText, MAX_MINUTES, pause)) { error = "Invalid GPIO or duration."; return false; }
+  if (mode != "OFF" && mode != "ON" && mode != "TIMER" && mode != "CYCLE") {
+    error = "Unknown output mode."; return false;
+  }
+  if (((mode == "TIMER" || mode == "CYCLE") && !work) || (mode == "CYCLE" && !pause) ||
+      ((mode == "OFF" || mode == "ON") && (work || pause)) || (mode == "TIMER" && pause)) {
+    error = "Durations do not match the selected mode."; return false;
+  }
+  for (auto& output : outputs) if (output.pin == pin) {
+    if (mode == "OFF") {
+      output.mode = 0; output.working = false;
+      digitalWrite(output.pin, LOW);
+      if (!saveOutputs()) { error = "Output is OFF, but its state could not be saved."; return false; }
+      return true;
+    }
+    Output previous = output;
+    output.mode = mode == "OFF" ? 0 : mode == "ON" ? 1 : 2;
+    output.work = work * 60000UL; output.pause = pause * 60000UL;
+    output.started = millis(); output.working = output.mode != 0;
+    if (!saveOutputs()) { output = previous; error = "Failed to persist output state."; return false; }
+    digitalWrite(output.pin, output.mode ? HIGH : LOW);
+    return true;
+  }
+  error = "GPIO is not an output channel.";
+  return false;
+}
+
+String statusText() {
+  String status = "Firmware: " + String(VERSION) + "\nStorage: " + (storageReady ? "ready" : "unavailable") +
+      "\nCredentials: " + (securityReady ? "ready" : "locked") + "\nModem: " + (modemReady ? "ready" : "initializing") +
+      "\nNetwork registration: " + String(registration) + "\nSignal: " + signalLevel +
+      "\nOperator: " + operatorName + "\nNetwork time: " + networkTime + "\n";
+  for (const auto& output : outputs) {
+    uint32_t duration = output.working ? output.work : output.pause;
+    uint32_t elapsed = millis() - output.started;
+    uint32_t remaining = duration > elapsed ? (duration - elapsed) / 1000 : 0;
+    status += "GPIO " + String(output.pin) + ": " + (digitalRead(output.pin) ? "ON" : "OFF") +
+        ", mode=" + String(output.mode) + ", remaining=" + String(output.mode == 2 ? remaining : 0) + "s\n";
+  }
+  return status;
+}
+
+bool queueSms(const String& number, const String& text, AsyncModem::Callback done) {
+  if (!validPhone(number) || !modemReady || (registration != 1 && registration != 5)) return false;
+  String encodedNumber, encodedText; size_t numberLength, textLength;
+  if (!utf8ToUcs2(number, encodedNumber, numberLength) || !utf8ToUcs2(text, encodedText, textLength) ||
+      !textLength || textLength > 70) return false;
+  return modem.enqueue("AT+CMGS=\"" + encodedNumber + "\"", 60000, done, encodedText);
+}
+
+// Parse SMS output commands with the same validation as USB requests.
+bool applySmsCommand(String text, String& message) {
+  text.trim(); text.toUpperCase();
+  if (text.startsWith("PIN ")) text.remove(0, 4);
+  else if (text.startsWith("#")) text.remove(0, 1);
+  else { message = "Expected PIN <number> ON/OFF [work [pause]]."; return false; }
+  String fields[4]; size_t count = 0;
+  while (text.length() && count < 4) {
+    text.trim(); int space = text.indexOf(' ');
+    if (space < 0) { fields[count++] = text; text = ""; }
+    else { fields[count++] = text.substring(0, space); text.remove(0, space + 1); }
+  }
+  text.trim();
+  if (text.length() || count < 2 || (fields[1] != "ON" && fields[1] != "OFF") ||
+      (fields[1] == "OFF" && count != 2)) { message = "Invalid output command."; return false; }
+  String mode = fields[1];
+  if (count == 3) mode = "TIMER";
+  if (count == 4) mode = "CYCLE";
+  bool ok = configureOutput(fields[0], mode, count >= 3 ? fields[2] : "0", count == 4 ? fields[3] : "0", message);
+  if (ok) message = "GPIO " + fields[0] + " configured: " + mode;
+  return ok;
+}
+
+uint16_t pendingSms[16];
+uint8_t smsHead = 0, smsCount = 0;
+bool readingSms = false;
+struct SmsFingerprint { uint16_t index = 0; uint32_t hash = 0; };
+SmsFingerprint processedSms[64];
+uint8_t fingerprintNext = 0;
+
+void deleteProcessedSms(uint16_t index) {
+  if (!modem.enqueue("AT+CMGD=" + String(index), 3000, [index](bool deleted, const String&) {
+        if (!deleted) event("Processed SMS could not be deleted; it will not be executed again in this run.");
+        else for (auto& item : processedSms) if (item.index == index) item.index = 0;
+      })) event("SMS delete queue is full.");
+}
+
+void scheduleSms(uint16_t index) {
+  for (uint8_t i = 0; i < smsCount; ++i) if (pendingSms[(smsHead + i) % 16] == index) return;
+  if (index && smsCount < 16) pendingSms[(smsHead + smsCount++) % 16] = index;
+}
+
+void handleSmsResponse(uint16_t index, bool ok, const String& response) {
+  readingSms = false;
+  if (!ok) { event("SMS read failed; the modem copy was retained."); return; }
+  int header = response.indexOf("+CMGR:");
+  int first = response.indexOf('"', header), second = response.indexOf('"', first + 1);
+  int senderStart = response.indexOf('"', second + 1), senderEnd = response.indexOf('"', senderStart + 1);
+  int bodyStart = response.indexOf('\n', senderEnd);
+  if (header < 0 || first < 0 || second < 0 || senderStart < 0 || senderEnd < 0 || bodyStart < 0) {
+    if (appendLog(SMS_LOG, "Malformed SMS at modem index " + String(index))) deleteProcessedSms(index);
+    return;
+  }
+  String sender, text, encodedBody = response.substring(bodyStart + 1);
+  encodedBody.trim();
+  if (!ucs2ToUtf8(response.substring(senderStart + 1, senderEnd), sender) || !ucs2ToUtf8(encodedBody, text)) {
+    if (appendLog(SMS_LOG, "Unsupported SMS encoding at modem index " + String(index))) deleteProcessedSms(index);
+    return;
+  }
+  uint32_t fingerprint = 2166136261UL;
+  // Omit the mutable READ/UNREAD status; include sender, date and body.
+  String identity = response.substring(senderStart);
+  for (size_t i = 0; i < identity.length(); ++i) fingerprint = (fingerprint ^ uint8_t(identity[i])) * 16777619UL;
+  for (const auto& item : processedSms) if (item.index == index && item.hash == fingerprint) {
+    deleteProcessedSms(index);
+    return;
+  }
+  if (!appendLog(SMS_LOG, "[" + networkTime + "] " + sender + ": " + text)) {
+    event("SMS could not be logged; the modem copy was retained."); return;
+  }
+  processedSms[fingerprintNext] = {index, fingerprint};
+  fingerprintNext = (fingerprintNext + 1) % 64;
+  event("Incoming SMS recorded.");
+  if (samePhone(sender, adminNumber) && securityReady) {
+    String result;
+    bool applied = applySmsCommand(text, result);
+    if (!queueSms(sender, result, [](bool sent, const String&) {
+          if (!sent) event("SMS command reply failed.");
+        })) event(applied ? "Output updated; SMS reply unavailable." : "SMS command rejected.");
+  }
+  deleteProcessedSms(index);
+}
+
+void modemNotification(const String& line) {
+  if (line == "RDY") {
+    modemReady = false;
+    registration = 0;
+    event("Modem restarted; configuration will be restored.");
+  } else if (line.startsWith("+CMGL:")) {
+    int comma = line.indexOf(','); uint32_t index;
+    String text = line.substring(6, comma); text.trim();
+    if (comma > 6 && parseUnsigned(text, 65535, index)) scheduleSms(index);
+  } else if (line.startsWith("+CMTI:")) {
+    int comma = line.indexOf(','); uint32_t index;
+    String text = line.substring(comma + 1); text.trim();
+    if (comma >= 0 && parseUnsigned(text, 65535, index)) scheduleSms(index);
+  } else if (line.startsWith("+CLIP:")) {
+    int start = line.indexOf('"'), end = line.indexOf('"', start + 1);
+    if (start >= 0 && end > start) appendLog(CALL_LOG, "[" + networkTime + "] " + line.substring(start + 1, end));
+    if (!modem.enqueue("ATH", 3000, [](bool ok, const String&) {
+          event(ok ? "Incoming call rejected." : "Call rejection failed.");
+        })) event("Cannot reject call: modem queue is full.");
+  }
+}
+
+void tickModemStartup() {
+  static uint8_t stage = 0, config = 0;
+  static uint32_t since = 0;
+  static bool pending = false;
+  static const char* commands[] = {"ATE0", "AT+CMGF=1", "AT+CSCS=\"UCS2\"", "AT+CSMP=17,167,0,8",
+      "AT+CNMI=2,1,0,0,0", "AT+CLIP=1", "AT+CPMS=\"SM\",\"SM\",\"SM\""};
+  if (stage == 5 && !modemReady) { stage = 3; config = 0; since = millis(); }
+  if (stage == 0) { digitalWrite(MODEM_POWER, HIGH); digitalWrite(MODEM_KEY, LOW); since = millis(); stage = 1; }
+  else if (stage == 1 && uint32_t(millis() - since) >= 1200) { digitalWrite(MODEM_KEY, HIGH); since = millis(); stage = 2; }
+  else if (stage == 2 && uint32_t(millis() - since) >= 3000) stage = 3;
+  else if (stage == 3 && !pending && modem.idle() && uint32_t(millis() - since) >= 1000) {
+    pending = modem.enqueue("AT", 1500, [](bool ok, const String&) {
+      pending = false; since = millis(); if (ok) stage = 4;
+    });
+  } else if (stage == 4 && !pending && modem.idle()) {
+    if (config == sizeof(commands) / sizeof(commands[0])) {
+      modemReady = true; stage = 5; event("Modem initialized; waiting for network registration.");
+    } else {
+      pending = modem.enqueue(commands[config], 3000, [](bool ok, const String&) {
+        pending = false;
+        if (ok) ++config;
+        else { config = 0; stage = 3; since = millis(); }
+      });
+    }
+  }
+}
+
+void pollModem() {
+  static uint32_t last = 0;
+  static uint8_t query = 0;
+  if (!modemReady || !modem.idle() || uint32_t(millis() - last) < 5000) return;
+  last = millis();
+  switch (query++ % 5) {
+    case 0: modem.enqueue("AT+CREG?", 2000, [](bool ok, const String& response) {
+      if (!ok) { registration = 0; return; }
+      int start = response.indexOf("+CREG:"), comma = response.indexOf(',', start);
+      registration = comma >= 0 ? response.substring(comma + 1).toInt() : 0;
+    }); break;
+    case 1: modem.enqueue("AT+CSQ", 2000, [](bool ok, const String& response) {
+      int start = response.indexOf("+CSQ:"), comma = response.indexOf(',', start);
+      signalLevel = ok && start >= 0 && comma > start ? response.substring(start + 5, comma) : "unknown";
+      signalLevel.trim();
+    }); break;
+    case 2: modem.enqueue("AT+COPS?", 2000, [](bool ok, const String& response) {
+      int first = response.indexOf('"'), lastQuote = response.indexOf('"', first + 1);
+      operatorName = ok && first >= 0 && lastQuote > first ? boundedUtf8(response.substring(first + 1, lastQuote), 64) : "unknown";
+    }); break;
+    case 3: modem.enqueue("AT+CCLK?", 2000, [](bool ok, const String& response) {
+      int first = response.indexOf('"'), lastQuote = response.indexOf('"', first + 1);
+      networkTime = ok && first >= 0 && lastQuote > first ? boundedUtf8(response.substring(first + 1, lastQuote), 64) : "unknown";
+    }); break;
+    case 4: modem.enqueue("AT+CMGL=\"ALL\"", 5000, [](bool ok, const String& response) {
+      if (!ok) return;
+      int position = 0;
+      while ((position = response.indexOf("+CMGL:", position)) >= 0) {
+        int comma = response.indexOf(',', position);
+        String value = response.substring(position + 6, comma); value.trim(); uint32_t index;
+        if (comma > position && parseUnsigned(value, 65535, index)) scheduleSms(index);
+        position += 6;
       }
-      modemBuffer = ""; 
+    }); break;
+  }
+}
+
+void handleRequest(const String& line) {
+  String fields[8]; size_t count = 0, start = 0;
+  for (size_t i = 0; i <= line.length(); ++i) if (i == line.length() || line[i] == '\t') {
+    if (count == 8) { reply(0, false, "Too many fields."); return; }
+    fields[count++] = line.substring(start, i); start = i + 1;
+  }
+  uint32_t id = 0;
+  if (count < 3 || fields[0] != "TCALL/1" || !parseUnsigned(fields[1], 2147483647UL, id) || !id) {
+    reply(0, false, "Expected protocol TCALL/1. Use the matching desktop client."); return;
+  }
+  for (size_t i = 3; i < count; ++i) {
+    String decoded;
+    if (!hexDecode(fields[i], decoded)) { reply(id, false, "Invalid argument encoding."); return; }
+    fields[i] = decoded;
+  }
+  const String& command = fields[2];
+  if (command == "HELLO" && count == 3) reply(id, true, "TCall Pager " + String(VERSION));
+  else if (command == "INIT_STORAGE" && count == 3) {
+    // First-time provisioning requires an explicit command and physical BOOT
+    // button access. A mounted filesystem can never be formatted by USB.
+    if (storageReady || digitalRead(0) != LOW) {
+      reply(id, false, "Storage initialization requires an unmounted filesystem and the BOOT button held down."); return;
+    }
+    if (!LittleFS.format() || !LittleFS.begin(false)) { reply(id, false, "Storage initialization failed."); return; }
+    storageReady = true;
+    loadState();
+    reply(id, securityReady, securityReady ? "Storage initialized. Change the default credentials." : "Credential initialization failed.");
+  }
+  else if (command == "STATUS" && count == 3) reply(id, true, statusText());
+  else if ((command == "SMS_LOG" || command == "CALL_LOG") && count == 3) {
+    reply(id, storageReady, storageReady ? recentLog(command == "SMS_LOG" ? SMS_LOG : CALL_LOG) : "Storage unavailable.");
+  } else if (command == "GPIO" && count == 7) {
+    String error;
+    bool ok = configureOutput(fields[3], fields[4], fields[5], fields[6], error);
+    reply(id, ok, ok ? "Output setting applied." : error);
+  } else if (command == "SEND_SMS" && count == 5) {
+    if (!queueSms(fields[3], fields[4], [id](bool ok, const String& response) {
+          reply(id, ok, ok ? "SMS submitted to the modem; recipient delivery is not confirmed." : response);
+        })) reply(id, false, "Invalid SMS, modem not registered, or command queue full.");
+  } else if ((command == "SET_ADMIN" || command == "SET_PASSWORD" || command == "SAFE_RESET" || command == "CLEAR_LOGS") &&
+             count == (command == "SET_ADMIN" || command == "SET_PASSWORD" ? 5 : 4)) {
+    if (!authenticate(fields[3])) { reply(id, false, "Authentication failed or temporarily locked."); return; }
+    if (command == "SET_ADMIN") {
+      if (!validPhone(fields[4]) || !saveSettings(fields[4], passwordSalt, passwordHash)) {
+        reply(id, false, "Invalid number or settings write failed."); return;
+      }
+      adminNumber = fields[4]; reply(id, true, "Administrator number updated.");
+    } else if (command == "SET_PASSWORD") {
+      String encoded; size_t characters;
+      if (!utf8ToUcs2(fields[4], encoded, characters) || characters < 6 || characters > 64) {
+        reply(id, false, "Password must contain 6-64 BMP characters."); return;
+      }
+      String salt = newSalt(), hash = hashPassword(fields[4], salt, false);
+      if (!hash.length() || !saveSettings(adminNumber, salt, hash)) { reply(id, false, "Settings write failed."); return; }
+      passwordSalt = salt; passwordHash = hash; reply(id, true, "Password updated.");
+    } else if (command == "SAFE_RESET") {
+      for (auto& output : outputs) { output.mode = 0; output.working = false; digitalWrite(output.pin, LOW); }
+      reply(id, saveOutputs(), "All outputs are OFF. Check status if persistence failed.");
+    } else {
+      bool sms = !LittleFS.exists(SMS_LOG) || LittleFS.remove(SMS_LOG);
+      bool calls = !LittleFS.exists(CALL_LOG) || LittleFS.remove(CALL_LOG);
+      reply(id, sms && calls, sms && calls ? "Logs cleared; settings and SIM messages preserved." : "Some logs could not be removed.");
+    }
+  } else reply(id, false, "Unknown command or incorrect argument count.");
+}
+
+void handleUsb() {
+  unsigned budget = 256;
+  while (budget-- && usbWriter.available() && Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      if (!discardUsbLine && usbLine.length()) handleRequest(usbLine);
+      usbLine = ""; discardUsbLine = false;
+    } else if (c != '\r' && !discardUsbLine) {
+      usbLine += c;
+      if (usbLine.length() > MAX_USB_LINE) { usbLine = ""; discardUsbLine = true; reply(0, false, "USB line too long."); }
     }
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  pinMode(STATUS_LED, OUTPUT);
-  for (int i = 0; i < numCtrlPins; i++) { pinMode(pins[i].pin, OUTPUT); digitalWrite(pins[i].pin, LOW); }
-  
-  if (!LittleFS.begin(true)) Serial.println("LittleFS Mount Failed");
-  
-  initSecurityAndState(); // Load secure params & restore pin states
-  initModem();            // Setup SIM800L
-  
-  randomSeed(micros());
-  lastStatusUpdate = millis();
-  lastSmsCleanup = millis();
-  
-  // Меню выводится ТОЛЬКО после полной синхронизации initModem()
-  printMenu();
+  pinMode(0, INPUT_PULLUP);
+  for (auto& output : outputs) { pinMode(output.pin, OUTPUT); digitalWrite(output.pin, LOW); }
+  pinMode(MODEM_POWER, OUTPUT); pinMode(MODEM_KEY, OUTPUT);
+  // Never format automatically after a mount failure: settings must survive.
+  storageReady = LittleFS.begin(false);
+  loadState();
+  modemSerial.setRxBufferSize(4096);
+  modemSerial.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  modem.notification = modemNotification;
+  event("TCall Pager " + String(VERSION) + "; USB ready. Modem initialization is asynchronous.");
+  if (!storageReady || !securityReady) event("Storage unavailable or credentials invalid; output changes are locked.");
 }
 
 void loop() {
-  handleModemAsync();
-  handleSerialUI();
-  updateHardwareStates(); // Неблокирующий обработчик таймеров для пинов
-
-  // StatusBar & Cleanup timers
-  if (millis() - lastStatusUpdate > 60000) {
-    lastStatusUpdate = millis();
-    String csq = sendAT("AT+CSQ", 500);
-    int i1 = csq.indexOf(":") + 1; int i2 = csq.indexOf(",");
-    if (i1 > 0 && i2 > 0) { currentSignal = csq.substring(i1, i2); currentSignal.trim(); }
-    
-    String cclk = sendAT("AT+CCLK?", 500);
-    int t1 = cclk.indexOf(",") + 1;
-    if (t1 > 0) {
-      String newTime = cclk.substring(t1, t1 + 5);
-      if (newTime.indexOf(":") != -1) currentTime = newTime;
-    }
+  updateOutputs();
+  usbWriter.tick();
+  handleUsb();
+  tickModemStartup();
+  modem.tick();
+  if (modemReady && !readingSms && smsCount && modem.idle()) {
+    uint16_t index = pendingSms[smsHead]; smsHead = (smsHead + 1) % 16; --smsCount;
+    readingSms = modem.enqueue("AT+CMGR=" + String(index), 5000,
+        [index](bool ok, const String& response) { handleSmsResponse(index, ok, response); });
   }
-  if (millis() - lastSmsCleanup > 60000) { lastSmsCleanup = millis(); deleteOldSms(); }
-
-  // LED blinker
-  if (isBlinking) {
-    if (millis() - blinkStart > 3000) { isBlinking = false; digitalWrite(STATUS_LED, LOW); }
-    else { digitalWrite(STATUS_LED, (millis() / 200) % 2); }
-  }
+  pollModem();
+  updateOutputs();
+  delay(1);  // Yield to the ESP32 scheduler without delaying modem transactions.
 }
