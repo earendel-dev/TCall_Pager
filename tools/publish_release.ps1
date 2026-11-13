@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 if (-not $ReleaseDirectory) { $ReleaseDirectory = Join-Path $repoRoot "dist\release" }
 $repository = "earendel-dev/TCall_Pager"
-$tag = "v1.1.0-rc.1"
+$tag = "v1.1.0-rc.2"
 Push-Location $repoRoot
 try {
     $remote = & git remote get-url origin
@@ -23,7 +23,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Remote main is not an ancestor; resolve divergence without force-pushing." }
     & gh release view $tag --repo $repository --json tagName 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists; it will not be overwritten." }
-    $assets = @("TCallPager-1.1.0-rc.1-windows.zip", "TCall_Pager-1.1.0-rc.1-source.zip", "SHA256SUMS.txt") | ForEach-Object {
+    $assets = @("TCallPager-1.1.0-rc.2-windows.zip", "TCall_Pager-1.1.0-rc.2-source.zip", "SHA256SUMS.txt") | ForEach-Object {
         $asset = Join-Path $ReleaseDirectory $_
         if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw "Missing release asset: $_" }
         $asset
@@ -40,7 +40,7 @@ try {
     if (-not $run) { throw "CI did not start; no release was created." }
     & gh run watch $run --repo $repository --exit-status
     if ($LASTEXITCODE -ne 0) { throw "CI did not pass; no release was created." }
-    & gh release create $tag @assets --repo $repository --target $commit --prerelease --title "TCall Pager 1.1.0-rc.1" --notes-file (Join-Path $repoRoot "docs\RELEASE_NOTES.md")
+    & gh release create $tag @assets --repo $repository --target $commit --prerelease --title "TCall Pager 1.1.0-rc.2" --notes-file (Join-Path $repoRoot "docs\RELEASE_NOTES.md")
     if ($LASTEXITCODE -ne 0) { throw "Release creation failed." }
     & gh release view $tag --repo $repository --json url,isPrerelease,assets
 } finally { Pop-Location }

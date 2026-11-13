@@ -1,0 +1,57 @@
+"""Desktop translations; protocol tokens and device payloads remain unchanged."""
+
+LANGUAGES = (("en", "English"), ("ru", "Русский"), ("zh", "简体中文"), ("fa", "فارسی"))
+
+TRANSLATIONS = {
+    'USB port': {"ru": 'USB-порт', "zh": 'USB 端口', "fa": 'درگاه USB'},
+    'Refresh': {"ru": 'Обновить', "zh": '刷新', "fa": 'تازه\u200cسازی'},
+    'Connect': {"ru": 'Подключить', "zh": '连接', "fa": 'اتصال'},
+    'Disconnect': {"ru": 'Отключить', "zh": '断开', "fa": 'قطع اتصال'},
+    'Disconnected': {"ru": 'Отключено', "zh": '未连接', "fa": 'قطع شده'},
+    'Opening port…': {"ru": 'Открытие порта…', "zh": '正在打开端口…', "fa": 'در حال باز کردن درگاه…'},
+    'Checking firmware…': {"ru": 'Проверка прошивки…', "zh": '正在检查固件…', "fa": 'در حال بررسی میان\u200cافزار…'},
+    'Disconnecting…': {"ru": 'Отключение…', "zh": '正在断开…', "fa": 'در حال قطع اتصال…'},
+    'Outputs': {"ru": 'Выходы', "zh": '输出', "fa": 'خروجی\u200cها'},
+    'Mode': {"ru": 'Режим', "zh": '模式', "fa": 'حالت'},
+    'Work duration': {"ru": 'Время работы', "zh": '工作时长', "fa": 'مدت کار'},
+    'Pause duration': {"ru": 'Время паузы', "zh": '暂停时长', "fa": 'مدت توقف'},
+    'Apply output setting': {"ru": 'Применить настройку выхода', "zh": '应用输出设置', "fa": 'اعمال تنظیمات خروجی'},
+    'Send one SMS': {"ru": 'Отправка SMS', "zh": '发送一条短信', "fa": 'ارسال یک پیامک'},
+    'Destination': {"ru": 'Получатель', "zh": '接收号码', "fa": 'گیرنده'},
+    'Text (up to 70 BMP characters)': {"ru": 'Текст (до 70 символов BMP)', "zh": '文本（最多 70 个 BMP 字符）', "fa": 'متن (حداکثر ۷۰ نویسه BMP)'},
+    'Send SMS': {"ru": 'Отправить SMS', "zh": '发送短信', "fa": 'ارسال پیامک'},
+    'Administration': {"ru": 'Администрирование', "zh": '管理', "fa": 'مدیریت'},
+    'Current password': {"ru": 'Текущий пароль', "zh": '当前密码', "fa": 'گذرواژه فعلی'},
+    'New administrator number': {"ru": 'Новый номер администратора', "zh": '新管理员号码', "fa": 'شماره مدیر جدید'},
+    'Change administrator number': {"ru": 'Изменить номер администратора', "zh": '更改管理员号码', "fa": 'تغییر شماره مدیر'},
+    'New password (6–64 characters)': {"ru": 'Новый пароль (6–64 символа)', "zh": '新密码（6–64 个字符）', "fa": 'گذرواژه جدید (۶ تا ۶۴ نویسه)'},
+    'Change password': {"ru": 'Изменить пароль', "zh": '更改密码', "fa": 'تغییر گذرواژه'},
+    'All outputs OFF': {"ru": 'Выключить все выходы', "zh": '关闭所有输出', "fa": 'خاموش کردن همه خروجی\u200cها'},
+    'Clear device logs…': {"ru": 'Очистить журналы устройства…', "zh": '清除设备日志…', "fa": 'پاک کردن گزارش\u200cهای دستگاه…'},
+    'Status': {"ru": 'Состояние', "zh": '状态', "fa": 'وضعیت'},
+    'SMS log': {"ru": 'Журнал SMS', "zh": '短信日志', "fa": 'گزارش پیامک\u200cها'},
+    'Call log': {"ru": 'Журнал звонков', "zh": '通话日志', "fa": 'گزارش تماس\u200cها'},
+    'Page ': {"ru": 'Страница ', "zh": '页 ', "fa": 'صفحه '},
+    ' min': {"ru": ' мин', "zh": ' 分钟', "fa": ' دقیقه'},
+    'OFF': {"ru": 'Выкл.', "zh": '关闭', "fa": 'خاموش'},
+    'ON': {"ru": 'Вкл.', "zh": '开启', "fa": 'روشن'},
+    'TIMER': {"ru": 'Таймер', "zh": '定时', "fa": 'زمان\u200cسنج'},
+    'CYCLE': {"ru": 'Цикл', "zh": '循环', "fa": 'چرخه'},
+    'Select a serial port first.': {"ru": 'Сначала выберите COM-порт.', "zh": '请先选择串口。', "fa": 'ابتدا یک درگاه سریال انتخاب کنید.'},
+    'Connect to compatible firmware first.': {"ru": 'Сначала подключитесь к совместимой прошивке.', "zh": '请先连接兼容的固件。', "fa": 'ابتدا به میان\u200cافزار سازگار متصل شوید.'},
+    'Too many pending commands; wait for the device.': {"ru": 'Слишком много команд: дождитесь ответа устройства.', "zh": '待处理命令过多，请等待设备响应。', "fa": 'فرمان\u200cهای زیادی در انتظار است؛ منتظر دستگاه بمانید.'},
+    'Ignored an unmatched device response.': {"ru": 'Ответ с неизвестным номером запроса пропущен.', "zh": '已忽略不匹配的设备响应。', "fa": 'پاسخ نامرتبط دستگاه نادیده گرفته شد.'},
+    'The selected device is not a TCall Pager.': {"ru": 'Выбранное устройство не является TCall Pager.', "zh": '所选设备不是 TCall Pager。', "fa": 'دستگاه انتخاب\u200cشده TCall Pager نیست.'},
+    '{command}: response timeout; reconnect before retrying.': {"ru": '{command}: время ожидания истекло; подключитесь заново перед повтором.', "zh": '{command}：响应超时，请重新连接后重试。', "fa": '{command}: مهلت پاسخ تمام شد؛ پیش از تلاش دوباره متصل شوید.'},
+    'Clear logs': {"ru": 'Очистка журналов', "zh": '清除日志', "fa": 'پاک کردن گزارش\u200cها'},
+    'Delete device SMS and call logs? Settings and SIM messages will be preserved.': {"ru": 'Удалить журналы SMS и звонков? Настройки и сообщения SIM сохранятся.', "zh": '删除设备的短信和通话日志？设置和 SIM 卡短信将保留。', "fa": 'گزارش پیامک\u200cها و تماس\u200cهای دستگاه پاک شود؟ تنظیمات و پیامک\u200cهای سیم\u200cکارت حفظ می\u200cشوند.'},
+    'Yes': {"ru": 'Да', "zh": '是', "fa": 'بله'},
+    'No': {"ru": 'Нет', "zh": '否', "fa": 'خیر'},
+    'Use 10–15 digits, optionally starting with +.': {"ru": 'Введите 10–15 цифр, при необходимости с + в начале.', "zh": '请输入 10–15 位数字，可用 + 开头。', "fa": '۱۰ تا ۱۵ رقم وارد کنید؛ علامت + در ابتدا اختیاری است.'},
+    'SMS must contain 1–70 BMP characters; emoji are not supported.': {"ru": 'SMS должно содержать 1–70 символов BMP; эмодзи не поддерживаются.', "zh": '短信须包含 1–70 个 BMP 字符，不支持表情符号。', "fa": 'پیامک باید ۱ تا ۷۰ نویسه BMP داشته باشد؛ ایموجی پشتیبانی نمی\u200cشود.'},
+    'Password must contain 6–64 BMP characters.': {"ru": 'Пароль должен содержать 6–64 символа BMP.', "zh": '密码须包含 6–64 个 BMP 字符。', "fa": 'گذرواژه باید ۶ تا ۶۴ نویسه BMP داشته باشد.'},
+}
+
+def translate(text, language, **values):
+    translated = TRANSLATIONS.get(text, {}).get(language, text)
+    return translated.format(**values) if values else translated

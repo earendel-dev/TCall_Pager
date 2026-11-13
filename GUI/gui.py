@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 import os
 import serial.tools.list_ports
-from PySide6.QtCore import QTimer, QCoreApplication, QEvent
+from PySide6.QtCore import QTimer, QCoreApplication, QEvent, Qt, QSettings
 from PySide6.QtGui import QTextCursor, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 from protocol import VERSION, ProtocolError, encode_request, parse_response, validate_phone, validate_sms, validate_password
 from serial_worker import SerialWorker
+from i18n import LANGUAGES, translate
 
 
 def prepare_application(application):
@@ -27,6 +28,11 @@ def prepare_application(application):
         if not families:
             raise RuntimeError("No readable system font is available.")
         application.setFont(QFont(families[0], 10))
+        # Offscreen sessions also need an explicit CJK fallback. Use the OS
+        # font when present; Windows font files are never bundled.
+        cjk = path.parent / "msyh.ttc"
+        if cjk.exists():
+            QFontDatabase.addApplicationFont(str(cjk))
 
 
 @dataclass
@@ -38,7 +44,7 @@ class PendingRequest:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, port_provider=None):
+    def __init__(self, port_provider=None, language="en"):
         super().__init__()
         self.setWindowTitle(f"TCall Pager {VERSION}")
         self.resize(1050, 760)
@@ -50,7 +56,10 @@ class MainWindow(QMainWindow):
         self._port_provider = port_provider or serial.tools.list_ports.comports
         self._ready = False
         self._closing = False
+        self.language = language if language in dict(LANGUAGES) else "en"
         self._build_ui()
+        self._capture_translations()
+        self.set_language(self.language)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(50)
@@ -76,6 +85,14 @@ class MainWindow(QMainWindow):
         self.connect_button = self._button("Connect", self.toggle_connection, connection)
         self.status = QLabel("Disconnected")
         connection.addWidget(self.status, 1)
+        self.language_combo = QComboBox()
+        self.language_combo.setAccessibleName("Language / زبان / 语言 / Язык")
+        for code, name in LANGUAGES:
+            self.language_combo.addItem(name, code)
+        self.language_combo.setCurrentIndex(self.language_combo.findData(self.language))
+        self.language_combo.currentIndexChanged.connect(
+            lambda: self.set_language(self.language_combo.currentData()))
+        connection.addWidget(self.language_combo)
         root.addLayout(connection)
         columns = QHBoxLayout()
         self.controls = QWidget()
@@ -84,7 +101,8 @@ class MainWindow(QMainWindow):
         form = QFormLayout(gpio)
         self.pin, self.mode = QComboBox(), QComboBox()
         self.pin.addItems(["12", "14", "15", "2", "21", "22", "25"])
-        self.mode.addItems(["OFF", "ON", "TIMER", "CYCLE"])
+        for mode in ("OFF", "ON", "TIMER", "CYCLE"):
+            self.mode.addItem(mode, mode)
         self.work_minutes, self.pause_minutes = QSpinBox(), QSpinBox()
         for field in (self.work_minutes, self.pause_minutes):
             field.setRange(1, 10080)
@@ -154,7 +172,7 @@ class MainWindow(QMainWindow):
 
     def log(self, message):
         self.console.moveCursor(QTextCursor.MoveOperation.End)
-        self.console.insertPlainText(message + "\n")
+        self.console.insertPlainText(self.text(message) + "\n")
 
     def _set_ready(self, ready):
         self._ready = ready
@@ -162,8 +180,8 @@ class MainWindow(QMainWindow):
         self.read_actions.setEnabled(ready)
 
     def _update_durations(self):
-        self.work_minutes.setEnabled(self.mode.currentText() in {"TIMER", "CYCLE"})
-        self.pause_minutes.setEnabled(self.mode.currentText() == "CYCLE")
+        self.work_minutes.setEnabled(self.mode.currentData() in {"TIMER", "CYCLE"})
+        self.pause_minutes.setEnabled(self.mode.currentData() == "CYCLE")
 
     def refresh_ports(self):
         selected = self.ports.currentData()
@@ -190,12 +208,12 @@ class MainWindow(QMainWindow):
         self.worker = worker
         self.ports.setEnabled(False)
         self.refresh_button.setEnabled(False)
-        self.connect_button.setText("Disconnect")
-        self.status.setText("Opening port…")
+        self._set_text(self.connect_button, "Disconnect")
+        self._set_text(self.status, "Opening port…")
         worker.start()
 
     def _connected(self):
-        self.status.setText("Checking firmware…")
+        self._set_text(self.status, "Checking firmware…")
         try:
             self.worker.submit(b"\n")  # Discard an incomplete frame left by an interrupted connection.
         except Exception as error:
@@ -211,7 +229,7 @@ class MainWindow(QMainWindow):
         self.new_password.clear()
         if self.worker is not None:
             self.worker.stop()
-            self.status.setText("Disconnecting…")
+            self._set_text(self.status, "Disconnecting…")
             self.connect_button.setEnabled(False)
 
     def _serial_failed(self, error):
@@ -225,11 +243,11 @@ class MainWindow(QMainWindow):
         self._set_ready(False)
         self._queue.clear()
         self._pending = None
-        self.status.setText("Disconnected")
+        self._set_text(self.status, "Disconnected")
         self.ports.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self.connect_button.setEnabled(True)
-        self.connect_button.setText("Connect")
+        self._set_text(self.connect_button, "Connect")
         if self._closing:
             self.close()
 
@@ -250,7 +268,7 @@ class MainWindow(QMainWindow):
     def _tick(self):
         if self._pending is not None:
             if time.monotonic() > self._deadline:
-                self.log(f"{self._pending.command}: response timeout; reconnect before retrying.")
+                self.log(self.text("{command}: response timeout; reconnect before retrying.", command=self._pending.command))
                 self.disconnect()
             return
         if self.worker is not None and self._queue:
@@ -292,14 +310,14 @@ class MainWindow(QMainWindow):
                 self._serial_failed("The selected device is not a TCall Pager.")
                 return
             self._set_ready(True)
-            self.status.setText(response.payload)
+            self._set_text(self.status, response.payload)
             self.request("STATUS")
         if command in {"SET_PASSWORD", "SET_ADMIN", "CLEAR_LOGS", "SAFE_RESET"}:
             self.password.clear()
             self.new_password.clear()
 
     def apply_gpio(self):
-        mode = self.mode.currentText()
+        mode = self.mode.currentData()
         self.request("GPIO", self.pin.currentText(), mode,
                      str(self.work_minutes.value()) if mode in {"TIMER", "CYCLE"} else "0",
                      str(self.pause_minutes.value()) if mode == "CYCLE" else "0")
@@ -339,8 +357,60 @@ class MainWindow(QMainWindow):
 
     def clear_logs(self):
         question = "Delete device SMS and call logs? Settings and SIM messages will be preserved."
-        if QMessageBox.question(self, "Clear logs", question) == QMessageBox.StandardButton.Yes:
+        dialog = QMessageBox(QMessageBox.Icon.Question, self.text("Clear logs"), self.text(question),
+                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+        dialog.button(QMessageBox.StandardButton.Yes).setText(self.text("Yes"))
+        dialog.button(QMessageBox.StandardButton.No).setText(self.text("No"))
+        dialog.setDefaultButton(QMessageBox.StandardButton.No)
+        if dialog.exec() == QMessageBox.StandardButton.Yes:
             self.request("CLEAR_LOGS", self.password.text())
+
+    def text(self, source, **values):
+        return translate(source, self.language, **values)
+
+    def _set_text(self, widget, source):
+        widget.setProperty("translation_source", source)
+        widget.setText(self.text(source))
+
+    def _capture_translations(self):
+        # Capture once; translating a translated label would lose its source key.
+        self._translated_widgets = []
+        for widget in self.findChildren(QWidget):
+            if isinstance(widget, (QLabel, QPushButton, QGroupBox)):
+                source = widget.title() if isinstance(widget, QGroupBox) else widget.text()
+                widget.setProperty("translation_source", source)
+                self._translated_widgets.append(widget)
+
+    def set_language(self, language):
+        if language not in dict(LANGUAGES):
+            return
+        self.language = language
+        # Keep the language selector in the top-right corner in every locale.
+        # Mirror the content area for Persian; serial identifiers stay LTR.
+        self.controls.setLayoutDirection(Qt.LayoutDirection.RightToLeft if language == "fa"
+                                         else Qt.LayoutDirection.LeftToRight)
+        for widget in self._translated_widgets:
+            text = self.text(widget.property("translation_source"))
+            if isinstance(widget, QGroupBox):
+                widget.setTitle(text)
+            else:
+                widget.setText(text)
+        for index in range(self.mode.count()):
+            self.mode.setItemText(index, self.text(self.mode.itemData(index)))
+        for field in (self.work_minutes, self.pause_minutes):
+            field.setSuffix(self.text(" min"))
+        self.log_page.setPrefix(self.text("Page "))
+        example = {"en": "+12025550123", "ru": "+79991234567",
+                   "zh": "+8613812345678", "fa": "+989121234567"}[language]
+        self.sms_number.setPlaceholderText(example)
+        self.new_number.setPlaceholderText(example)
+        for field in (self.ports, self.pin, self.sms_number, self.new_number,
+                      self.password, self.new_password, self.console):
+            field.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        index = self.language_combo.findData(language)
+        self.language_combo.blockSignals(True)
+        self.language_combo.setCurrentIndex(index)
+        self.language_combo.blockSignals(False)
 
     def closeEvent(self, event):
         if self.worker is not None:
@@ -354,7 +424,10 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     prepare_application(app)
-    window = MainWindow()
+    settings = QSettings("earendel-dev", "TCallPager")
+    window = MainWindow(language=settings.value("language", "en"))
+    window.language_combo.currentIndexChanged.connect(
+        lambda: settings.setValue("language", window.language))
     window.show()
     result = app.exec()
     window._timer.stop()

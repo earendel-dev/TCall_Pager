@@ -56,3 +56,12 @@ firmware correctness from passing desktop tests.
 6. Power-cycle constant outputs and timers; confirm the documented restart policy.
 7. Run a 24-hour soak test and a simulated `millis()` rollover test before calling
    the release stable.
+
+## Desktop localization (1.1.0-rc.2)
+
+The offline suite now contains 26 tests. Language-switch tests verify that GPIO
+wire commands, entered phone numbers and SMS text survive all four locales.
+They also cover Persian directionality and literal braces in device messages.
+English, Russian, Chinese and Persian window renders are in screenshots/.
+The frozen smoke check exercises every language and checks CJK/Persian glyphs.
+No device commands or flashing are performed by these checks.

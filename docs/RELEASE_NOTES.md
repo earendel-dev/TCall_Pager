@@ -1,34 +1,13 @@
-# TCall Pager 1.1.0-rc.1
+# TCall Pager 1.1.0-rc.2
 
-This release candidate introduces a versioned USB protocol and a matching
-desktop controller. The previous v1.0.0 release and its assets remain available.
+- Add English, Russian, Simplified Chinese and Persian desktop interfaces.
+- Switch languages live using the top-right selector; remember the selection.
+- Mirror Persian forms while retaining readable COM ports and phone numbers.
+- Keep protocol commands independent of translated output-mode labels.
+- Document Arduino IDE 2.3 or newer, ESP32 core 3.3.8 and automatic upload mode.
 
-## Main changes
-
-- Explicit GPIO commands with validated ON/OFF/timer/cycle semantics.
-- Request IDs and acknowledgements replace timed serial-menu macros.
-- Nonblocking modem startup and queued AT transactions; unsolicited SMS/call
-  notifications are handled separately from command responses.
-- Log cleanup preserves administrator settings, output configuration and SIM messages.
-- New password KDF, hardware-generated salts, atomic settings writes and lockout.
-- Native PySide6 desktop, masked password fields, bounded serial/console buffers,
-  and queue cancellation on errors, disconnects and uncertain timeouts.
-- English README/comments, protocol documentation, build scripts and offline tests.
-
-## Compatibility
-
-Use the firmware and desktop client from the same release. The candidate GUI
-refuses to enable controls when an older firmware does not answer its handshake.
-Valid legacy credentials can be imported. Reboots cancel timers/cycles and restore
-only constant-ON channels. Full phone-number matching replaces suffix matching.
-
-## Verification and limits
-
-24 offline tests pass using native Qt. The frozen desktop self-check exits 0.
-The firmware also compiles and links in GitHub Actions using ESP32 core 3.3.8.
-The release includes the resulting firmware binaries. Hardware acceptance tests
-remain required before stable use; see [validation notes](https://github.com/earendel-dev/TCall_Pager/blob/v1.1.0-rc.1/docs/VALIDATION.md).
-
-No device was flashed during local preparation because COM7 could not be opened.
-Do not infer recipient SMS delivery from a modem submission acknowledgement.
-Do not use this candidate as a hardware safety controller.
+The USB protocol remains TCALL/1. The new desktop client also supports rc.1
+firmware; flashing is not required just to change the interface language.
+Device responses and operating-system diagnostics remain in their original language.
+This remains a prerelease pending full hardware acceptance. Previous releases
+are preserved. Extract the Windows ZIP completely and keep `_internal` beside the EXE.

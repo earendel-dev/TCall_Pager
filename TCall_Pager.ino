@@ -7,7 +7,7 @@
 #include "modem.h"
 
 // LilyGO T-Call v1.3: GPIO assignments must match the connected relay board.
-constexpr char VERSION[] = "1.1.0-rc.1";
+constexpr char VERSION[] = "1.1.0-rc.2";
 constexpr int MODEM_RX = 26, MODEM_TX = 27, MODEM_POWER = 23, MODEM_KEY = 4;
 constexpr uint8_t STATUS_LED = 13;
 constexpr uint32_t MAX_MINUTES = 10080;

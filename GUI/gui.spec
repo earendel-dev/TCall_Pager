@@ -2,7 +2,7 @@
 from pathlib import Path
 from importlib.util import find_spec
 
-version = "1.1.0-rc.1"
+version = "1.1.0-rc.2"
 name = f"TCallPager-{version}"
 analysis = Analysis(
     ["launcher.py"], pathex=[str(Path(SPECPATH))], binaries=[], datas=[],

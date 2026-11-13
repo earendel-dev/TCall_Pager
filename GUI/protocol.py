@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import re
 
-VERSION = "1.1.0-rc.1"
+VERSION = "1.1.0-rc.2"
 PREFIX = "TCALL/1"
 MAX_LINE_BYTES = 4096
 MAX_ARGUMENT_BYTES = 512

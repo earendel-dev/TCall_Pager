@@ -24,7 +24,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-windows
-          path: GUI/dist/TCallPager-1.1.0-rc.1-windows/
+          path: GUI/dist/TCallPager-1.1.0-rc.2-windows/
   firmware:
     runs-on: ubuntu-latest
     steps:

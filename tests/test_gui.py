@@ -50,6 +50,41 @@ class GuiTests(unittest.TestCase):
     def reply(self, request, status="OK", payload="done"):
         self.window._line(f"TCALL/1\t{request.request_id}\t{status}\t{payload.encode().hex()}")
 
+    def test_languages_preserve_protocol_and_in_progress_state(self):
+        self.transport()
+        self.window._set_ready(True)
+        self.window.mode.setCurrentIndex(self.window.mode.findData("CYCLE"))
+        self.window.work_minutes.setValue(7)
+        self.window.pause_minutes.setValue(3)
+        self.window.sms_text.setText("پیام 中文")
+        self.window.sms_number.setText("+8613812345678")
+        self.window._set_text(self.window.connect_button, "Disconnect")
+        for language in ("zh", "fa", "ru", "en"):
+            self.window.set_language(language)
+            self.assertEqual(self.window.sms_text.text(), "پیام 中文")
+            self.assertEqual(self.window.sms_number.text(), "+8613812345678")
+            self.assertTrue(self.window._ready)
+            self.assertEqual(self.window.connect_button.text(), self.window.text("Disconnect"))
+            self.window.apply_gpio()
+            fields = self.window._queue.pop().frame.decode().strip().split("\t")
+            self.assertEqual([bytes.fromhex(v).decode() for v in fields[3:]],
+                             ["12", "CYCLE", "7", "3"])
+        self.window.set_language("fa")
+        from PySide6.QtCore import Qt
+        self.assertEqual(self.window.controls.layoutDirection(), Qt.LayoutDirection.RightToLeft)
+        self.assertEqual(self.window.sms_number.layoutDirection(), Qt.LayoutDirection.LeftToRight)
+
+    def test_translation_catalogue_is_complete_and_device_braces_are_literal(self):
+        from i18n import TRANSLATIONS, translate
+        for source, translations in TRANSLATIONS.items():
+            self.assertEqual(set(translations), {"ru", "zh", "fa"}, source)
+            for language in translations:
+                self.assertTrue(translate(source, language, command="GPIO"))
+        for language in ("en", "ru", "zh", "fa"):
+            self.window.set_language(language)
+            self.window.log("device text {not_a_template}")
+        self.assertIn("device text {not_a_template}", self.window.console.toPlainText())
+
     def test_disconnected_controls_are_disabled(self):
         self.assertFalse(self.window.controls.isEnabled())
         self.assertFalse(self.window.read_actions.isEnabled())

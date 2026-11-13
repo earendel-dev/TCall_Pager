@@ -22,6 +22,14 @@ def self_check():
     window.show()
     application.processEvents()
     assert not window.controls.isEnabled()
+    for language in ("en", "ru", "zh", "fa"):
+        window.set_language(language)
+        application.processEvents()
+        assert window.language_combo.currentData() == language
+        assert window.mode.currentData() == "OFF"
+        assert not window.controls.isEnabled()
+    assert QFontMetrics(application.font()).inFontUcs4(ord("中"))
+    assert QFontMetrics(application.font()).inFontUcs4(ord("پ"))
     window.close()
     window._timer.stop()
     window.deleteLater()

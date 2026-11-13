@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0-rc.2
+
+- Add live English, Russian, Chinese and Persian desktop language selection.
+- Persist the selected language and support right-to-left Persian forms.
+- Preserve machine protocol tokens when output-mode labels are translated.
+- Document Arduino IDE 2.3+ and automatic entry into upload mode.
+
+
 ## 1.1.0-rc.1
 
 This release candidate changes the USB protocol. Use the desktop application

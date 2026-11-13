@@ -7,12 +7,12 @@ for **LilyGO T-Call v1.3**.
 [USB protocol](docs/PROTOCOL.md) · [Validation](docs/VALIDATION.md) ·
 [Changelog](CHANGELOG.md) · [Baseline audit](docs/AUDIT.md)
 
-> **1.1.0-rc.1 is a release candidate.** Its desktop client requires the matching
-> firmware. Keep using v1.0.0 with the original firmware until the candidate has
-> passed compilation and hardware acceptance checks. Installing the desktop
-> client does not flash the board. Existing releases are preserved.
+> **1.1.0-rc.2 is a release candidate.** Its desktop client requires TCALL/1
+> firmware (rc.1 or rc.2). Keep using v1.0.0 with the original firmware until
+> the device is upgraded. Installing the desktop client does not flash the
+> board. Existing releases are preserved.
 
-![Desktop controller before connecting](docs/screenshots/controller.png)
+![Desktop controller before connecting](docs/screenshots/controller-en.png)
 
 ## What it does
 
@@ -64,6 +64,24 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -r GUI\requirements.txt
 .\.venv\Scripts\python GUI\gui.py
 ```
+
+## Interface language
+
+Use the language selector at the top right to switch between English, Russian,
+Simplified Chinese and Persian (Farsi). The choice is saved for the next launch.
+Persian forms use right-to-left layout; COM ports, phone numbers and diagnostic
+output retain left-to-right direction. Device replies and OS errors are shown
+as received, so protocol diagnostics remain useful.
+
+## Flashing with Arduino IDE
+
+Use **Arduino IDE 2.3 or newer** and install **esp32 by Espressif Systems 3.3.8**
+through Boards Manager. Open `TCall_Pager.ino`, select **ESP32 Wrover Module**,
+the default partition scheme and the board's CP210x COM port.
+Close the desktop client and Serial Monitor, then click **Upload**.
+On the tested board, upload mode is entered automatically; manually holding
+BOOT is normally unnecessary. The Arduino IDE 1.8 Windows Store build showed
+intermittent failures during library detection and is not recommended.
 
 ## Credentials and storage
 
@@ -127,7 +145,7 @@ python -m unittest discover -s tests -v
 .\tools\build_desktop.ps1
 ```
 
-The output folder is `GUI/dist/TCallPager-1.1.0-rc.1-windows/`. It contains the
+The output folder is `GUI/dist/TCallPager-1.1.0-rc.2-windows/`. It contains the
 application EXE, `_internal` runtime dependencies and a console twin ending in
 `-selfcheck.exe`. The twin accepts `--self-check` and opens no physical port.
 

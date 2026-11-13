@@ -9,7 +9,7 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "1.1.0-rc.1"
+VERSION = "1.1.0-rc.2"
 
 
 def run(*arguments, cwd=ROOT):

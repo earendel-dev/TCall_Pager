@@ -6,6 +6,6 @@ Push-Location (Join-Path $repoRoot "GUI")
 try {
     & $Python -m PyInstaller --clean --noconfirm gui.spec
     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed ($LASTEXITCODE)." }
-    & ".\dist\TCallPager-1.1.0-rc.1-windows\TCallPager-1.1.0-rc.1-selfcheck.exe" --self-check
+    & ".\dist\TCallPager-1.1.0-rc.2-windows\TCallPager-1.1.0-rc.2-selfcheck.exe" --self-check
     if ($LASTEXITCODE -ne 0) { throw "Frozen smoke check failed ($LASTEXITCODE)." }
 } finally { Pop-Location }
