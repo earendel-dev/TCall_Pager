@@ -8,6 +8,10 @@ $repository = "earendel-dev/TCall_Pager"
 $tag = "v1.1.0-rc.1"
 Push-Location $repoRoot
 try {
+    $remote = & git remote get-url origin
+    if ($LASTEXITCODE -ne 0 -or $remote -notmatch '^(https://github\.com/earendel-dev/TCall_Pager(\.git)?|git@github\.com:earendel-dev/TCall_Pager(\.git)?)$') {
+        throw "origin does not point to the intended TCall_Pager repository."
+    }
     & gh api "repos/$repository" --silent
     if ($LASTEXITCODE -ne 0) { throw "GitHub authentication or network access failed." }
     $changes = & git status --porcelain
