@@ -10,7 +10,7 @@ env/
 build/
 dist/
 *.manifest
-# старый spec от сборки "GUI TCall pager" (актуальный — GUI/gui.spec)
+# Ignore the retired build specification; GUI/gui.spec is authoritative.
 GUI/GUI TCall pager.spec
 
 # ---- IDE ----
@@ -28,3 +28,4 @@ Desktop.ini
 *.key
 *.pem
 secrets.*
+backups/

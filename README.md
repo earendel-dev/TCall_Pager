@@ -1,161 +1,160 @@
 # TCall Pager
 
-Прошивка для **LilyGO T-Call v1.3 (ESP32-WROVER-B + SIM800L)** и настольное приложение для Windows, которые превращают плату в автономный GSM-контроллер: управление нагрузкой по SMS, таймеры и циклы, журнал событий во внутренней файловой системе.
+ESP32/SIM800L output controller with SMS control and a Windows desktop client
+for **LilyGO T-Call v1.3**.
 
-Устройство рассчитано на круглосуточную работу 24/7 и не требует постоянного подключения к компьютеру.
+[Releases](https://github.com/earendel-dev/TCall_Pager/releases) ·
+[USB protocol](docs/PROTOCOL.md) · [Validation](docs/VALIDATION.md) ·
+[Changelog](CHANGELOG.md) · [Baseline audit](docs/AUDIT.md)
 
----
+> **1.1.0-rc.1 is a release candidate.** Its desktop client requires the matching
+> firmware. Keep using v1.0.0 with the original firmware until the candidate has
+> passed compilation and hardware acceptance checks. Installing the desktop
+> client does not flash the board. Existing releases are preserved.
 
-## Возможности
+![Desktop controller before connecting](docs/screenshots/controller.png)
 
-**Управление нагрузкой**
-- Семь каналов GPIO с тремя режимами: `OFF`, `CONST ON` (постоянно включён), `TIMER` (работа по таймеру или в цикле «работа / пауза»).
-- Состояние каналов сохраняется в LittleFS и восстанавливается после потери питания.
-- Команды принимаются по SMS только с номера администратора. Номер сверяется по последним 10 цифрам, поэтому формат записи (`+7`, `8`) не важен.
+## What it does
 
-**Журналирование**
-- Входящие SMS и звонки пишутся в файлы LittleFS с автоматической ротацией: при переполнении старые записи вытесняются новыми.
-- Память SIM-карты и модема очищается при каждом запуске и сразу после обработки сообщения, что исключает переполнение.
+- Control GPIO 12, 14, 15, 2, 21, 22 and 25: OFF, constant ON, timer or work/pause cycle.
+- Accept output commands from one administrator phone number.
+- Record SMS/call events in LittleFS, retaining at most 50 entries per log.
+- Read status and recent logs, submit SMS, and manage credentials over USB.
+- Keep USB and output timing available while the modem initializes or waits for replies.
 
-**Безопасность**
-- Вход в сервисное меню защищён паролем. В памяти хранится не сам пароль, а его хеш SHA-256, посчитанный от пароля, случайной соли и MAC-адреса чипа.
-- Поддерживается аппаратное шифрование flash-памяти ESP32 через eFuse (по желанию, на этапе прошивки).
+The firmware uses soft timers. It is not a safety controller; filesystem writes
+and password verification can introduce scheduling jitter. Use hardware
+interlocks where an output remaining ON could cause harm.
 
-**Настольное приложение**
-- Управление каналами, отправка SMS, чтение журналов и смена настроек доступа без запоминания команд.
-- Встроенный монитор последовательного порта с выводом всех ответов платы в реальном времени.
-- Готовый исполняемый файл не требует установки Python.
+## Hardware
 
----
+| Component | Configuration |
+|---|---|
+| Board | LilyGO T-Call v1.3, ESP32-WROVER-B, SIM800L |
+| USB bridge | CP2104 / CP210x driver |
+| Modem UART | RX 26, TX 27, 115200 baud |
+| Modem power | Enable 23, power key 4 |
+| USB protocol | 115200 baud, 8N1, protocol `TCALL/1` |
+| Firmware core | Arduino ESP32 3.3.8 |
+| Desktop | Windows; Python 3.10+ for source use, release built with Python 3.14 |
 
-## Состав репозитория
+Check the relay board's active level and boot-pin wiring before connecting
+loads. The sketch uses HIGH for ON and LOW for OFF. Constant-ON settings are
+restored after reboot; timers and cycles are cancelled and start OFF.
 
-| Путь | Назначение |
-| :--- | :--- |
-| `TCall_Pager.ino` | Прошивка для Arduino IDE |
-| `README.md` | Документация |
-| `GUI/gui.py` | Исходный код настольного приложения (PyQt6) |
-| `GUI/requirements.txt` | Зависимости Python |
-| `GUI/gui.spec` | Конфигурация сборки PyInstaller |
+## Desktop quick start
 
-Готовый `.exe` в репозитории не хранится, чтобы не раздувать историю git. Скачивайте его из раздела **[Releases](../../releases/latest)**.
+Download and extract `TCallPager-<version>-windows.zip` from a release, then run
+`TCallPager-<version>.exe` inside the extracted folder. Keep `_internal` beside
+the executable; the folder contains the Qt runtime and requires no Python installation. Connect the board,
+select its CP210x COM port, and click **Connect**. Controls remain disabled until
+the firmware answers a compatible handshake. Opening a port does not deliberately
+pulse reset, although USB drivers can briefly change control lines.
 
----
+The application reports success only after a matching device response. A timeout
+disconnects the client instead of replaying a potentially completed operation.
+Both password fields are masked; queued commands and password fields are cleared
+on disconnect. The console displays plain text and keeps at most 1,000 blocks.
 
-## Быстрый старт
+To run from source:
 
-### Прошивка
-
-1. Установите пакет плат **ESP32** в Arduino IDE.
-2. Выберите плату **ESP32 Dev Module** и схему разделов с поддержкой LittleFS (например, *Default 4MB with spiffs*).
-3. Откройте `TCall_Pager.ino`, прошейте плату.
-4. Установите SIM-карту, подключите антенну и подайте питание. При первом запуске файловая система создастся автоматически, а в журнал последовательного порта будут выведены этапы инициализации модема.
-
-### Настольное приложение
-
-Вариант 1 — готовый файл:
-
-1. Скачайте `TCallPager.exe` из **[Releases](../../releases/latest)**.
-2. Windows SmartScreen может предупредить, что файл не подписан: нажмите «Подробнее» → «Выполнить в любом случае».
-3. Подключите плату по USB, выберите COM-порт и нажмите «Подключить».
-
-Вариант 2 — запуск из исходников:
-
-```bash
-cd GUI
-pip install -r requirements.txt
-python gui.py
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r GUI\requirements.txt
+.\.venv\Scripts\python GUI\gui.py
 ```
 
-### Сборка .exe
+## Credentials and storage
 
-```bash
-cd GUI
-pip install -r requirements.txt pyinstaller
-pyinstaller gui.spec
+New installations use administrator `+70000000000` and password `000000`.
+Change both before use. New passwords contain 6–64 BMP characters and are salted with the ESP32 hardware RNG
+and stored using PBKDF2-HMAC-SHA256; the device MAC is also part of the salt
+material. Valid legacy credentials can be imported without resetting them.
+Damaged or incomplete credentials lock output changes rather than restoring
+public defaults.
+
+USB is a trusted local interface. Passwords are framed as hex, not encrypted
+over USB. Reading logs and controlling outputs do not require an administrator
+password over USB; changing credentials, clearing logs and SAFE RESET do.
+Five failed administrative authentications trigger a 30-second lockout.
+
+**Clear device logs** removes only the SMS and call log files. It preserves
+credentials, output settings and SIM messages. Startup and incoming calls do
+not trigger bulk SIM deletion. Incoming SMS is deleted individually after it
+has been logged; storage errors retain the modem copy for later recovery.
+
+The firmware never automatically formats a filesystem that fails to mount.
+For a new, unformatted partition, hold **BOOT after the board has booted**, then:
+
+```powershell
+python tools\pager_cli.py --port COM7 INIT_STORAGE
 ```
 
-Результат появится в `GUI/dist/gui.exe`. Каталоги `build/`, `dist/` и виртуальное окружение исключены из git и пересоздаются при каждой сборке.
+This command only works while the filesystem is unmounted. It formats that
+partition and creates default credentials; release BOOT afterwards. Do not use
+it to recover valuable data from a damaged installation without a backup.
 
----
+## SMS commands
 
-## Настройки по умолчанию
+Use the full administrator number, optionally prefixed with `+`. Country codes
+are significant; suffix-only matching and implicit `8`/`+7` substitution are
+not supported in the candidate.
 
-| Параметр | Значение |
-| :--- | :--- |
-| Номер администратора | `+70000000000` |
-| Пароль сервисного меню | `000000` |
-| Скорость порта | `115200` |
+| Message | Effect |
+|---|---|
+| `PIN 12 ON` | Constant ON |
+| `PIN 12 OFF` | OFF |
+| `PIN 12 ON 5` | ON for five minutes, then OFF |
+| `PIN 12 ON 5 10` | Cycle five minutes ON, ten minutes OFF |
+| `#12 ON 5` | Short form of the timer command |
 
-> **Важно:** сразу после первой прошивки смените номер и пароль. Значения по умолчанию опубликованы в документации и не обеспечивают защиту.
+Durations must be whole minutes in `1..10080` (seven days). A cycle requires
+nonzero work and pause durations. Invalid commands do not change the output.
+The GUI supports one SMS of 1–70 BMP characters, including text `0`. Emoji and
+multipart SMS are not supported. A modem submission acknowledgement is not a
+recipient delivery receipt.
 
----
+## Build and test
 
-## Команды по SMS
+Desktop:
 
-Команды принимаются только с номера администратора.
+```powershell
+python -m pip install -r GUI\requirements-build.txt
+python -m unittest discover -s tests -v
+.\tools\build_desktop.ps1
+```
 
-| Команда | Действие |
-| :--- | :--- |
-| `PIN 12 ON` | Включить канал 12 постоянно |
-| `PIN 12 OFF` | Выключить канал 12 |
-| `PIN 12 ON 5` | Включить на 5 минут, затем выключить |
-| `PIN 12 ON 5 10` | Цикл: 5 минут работы, 10 минут паузы |
+The output folder is `GUI/dist/TCallPager-1.1.0-rc.1-windows/`. It contains the
+application EXE, `_internal` runtime dependencies and a console twin ending in
+`-selfcheck.exe`. The twin accepts `--self-check` and opens no physical port.
 
-Вместо `PIN 12` допускается сокращённая форма `#12`. На каждую команду устройство отвечает подтверждающим SMS.
+Firmware, with Arduino CLI and ESP32 core 3.3.8 installed:
 
-Доступные каналы: `12`, `14`, `15`, `2`, `21`, `22`, `25`.
+```powershell
+.\tools\build_firmware.ps1
+```
 
----
+The script stages the correctly named sketch folder and compiles to
+`dist/firmware`. **It does not upload firmware, reset the device or alter eFuses.**
+Flash encryption is not configured by this sketch and requires a separate,
+reviewed ESP32 provisioning procedure.
 
-## Сервисное меню (USB)
+CI builds both components without uploading to hardware. See
+[validation status and acceptance checks](docs/VALIDATION.md) for the exact
+limits of local testing and the requirements before a stable release.
 
-Если приложение не используется, платой можно управлять через монитор последовательного порта:
+## Repository layout
 
-| Пункт | Действие |
-| :--- | :--- |
-| `1` | Показать журнал SMS |
-| `2` | Показать историю звонков |
-| `3` | Отправить SMS |
-| `4` | Управление GPIO: таблица состояний, включение и выключение |
-| `5` | Полная очистка журналов и памяти SIM |
-| `6` | Настройки администратора (требуется пароль) |
+```text
+TCall_Pager.ino       Outputs, storage, security and USB/SMS commands
+modem.h              Bounded asynchronous AT transactions and notifications
+GUI/gui.py           Desktop controls and request lifecycle
+GUI/protocol.py      USB framing and input validation
+GUI/serial_worker.py Thread-confined serial I/O
+tests/               Offline protocol, worker and native Qt checks
+tools/               Build-only scripts and a read-only/provisioning CLI
+docs/                Protocol, audit and validation notes
+```
 
----
-
-## Структура прошивки
-
-Код разделён на логические модули:
-
-- **PinConfig** — конфигурация и состояние каналов;
-- **Криптография** — хеширование пароля, генерация соли, чтение MAC;
-- **Журналирование** — запись и ротация файлов LittleFS;
-- **Модем** — AT-команды, отправка SMS, конвертация UTF-8 ↔ UCS2;
-- **Парсинг SMS** — разбор входящих сообщений и команд;
-- **Интерфейс** — меню в последовательном порту.
-
-Основной цикл неблокирующий: обработка модема, интерфейса и таймеров выполняется параллельно, что позволяет устройству оставаться отзывчивым во время длительных операций.
-
----
-
-## Требования
-
-- **Оборудование:** LilyGO T-Call v1.3 (ESP32-WROVER-B, SIM800L, CP2104).
-- **Прошивка:** Arduino IDE с ядром ESP32, библиотеки `LittleFS` и `mbedtls` входят в ядро.
-- **Приложение:** Windows 10 и новее либо Python 3.9+ с `pyserial` и `PyQt6`.
-
----
-
-## Разработка с использованием ИИ
-
-Часть кода и документации создана при помощи инструментов на базе искусственного интеллекта. Это касается прошивки `TCall_Pager.ino`, настольного приложения `GUI/gui.py` и этого README.
-
-ИИ использовался как вспомогательный инструмент: генерация шаблонного кода, рефакторинг, разбор документации на AT-команды SIM800L и оформление текста. Архитектурные решения, аппаратная конфигурация, тестирование на реальной плате и финальная проверка выполнялись автором вручную.
-
-Код предоставляется «как есть»: перед использованием в ответственных задачах его стоит внимательно изучить — особенно логику работы с GPIO и обработку команд по SMS.
-
----
-
-## Лицензия
-
-Проект распространяется без лицензии: авторские права сохраняются за автором, использование и распространение допускаются только по согласованию.
+No explicit software license has been granted. Copyright remains with the
+author; contact the repository owner about reuse and redistribution.
