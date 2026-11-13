@@ -1,509 +1,353 @@
+"""TCall Pager desktop controller. Commands complete only after a device reply."""
+from collections import deque
+from dataclasses import dataclass
 import sys
-import time  # Необходим для аппаратного сброса ESP32
+import time
+from pathlib import Path
+import os
+import serial.tools.list_ports
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QTextCursor, QFont, QFontDatabase
+from PySide6.QtWidgets import (
+    QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
+    QTextEdit, QVBoxLayout, QWidget,
+)
+from protocol import VERSION, ProtocolError, encode_request, parse_response, validate_phone, validate_sms, validate_password
+from serial_worker import SerialWorker
 
-try:
-    import serial
-    import serial.tools.list_ports
-    from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, \
-        QHBoxLayout, QComboBox, QPushButton, QTextEdit, \
-        QLineEdit, QLabel, QGroupBox, QFormLayout, QMessageBox, \
-        QSplitter, QScrollArea
-    from PyQt6.QtCore import QThread, pyqtSignal, QTimer, Qt
-except ModuleNotFoundError as exc:
-    missing = exc.name or "зависимости"
-    sys.stderr.write(
-        f"Не найдена библиотека: {missing}.\n"
-        "Установите зависимости командой:\n"
-        "    pip install -r requirements.txt\n"
-    )
-    sys.exit(1)
 
-# =====================================================================
-# СОВРЕМЕННЫЙ СТИЛЬ (QSS)
-# =====================================================================
-MODERN_STYLE = """
-QWidget {
-    background-color: #2b2d30;
-    color: #dfe1e5;
-    font-family: 'Segoe UI', 'San Francisco', Arial, sans-serif;
-    font-size: 13px;
-}
-QGroupBox {
-    border: 1px solid #43454a;
-    border-radius: 6px;
-    margin-top: 12px;
-    padding-top: 10px;
-    font-weight: bold;
-    color: #8bb9ff;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 5px;
-}
-QPushButton {
-    background-color: #43454a;
-    border: 1px solid #55575c;
-    border-radius: 5px;
-    padding: 6px 12px;
-    color: #ffffff;
-    font-weight: 500;
-}
-QPushButton:hover {
-    background-color: #4e5157;
-    border: 1px solid #66686d;
-}
-QPushButton:pressed {
-    background-color: #393b40;
-}
-QLineEdit, QComboBox {
-    background-color: #1e1f22;
-    border: 1px solid #43454a;
-    border-radius: 4px;
-    padding: 5px;
-    color: #dfe1e5;
-}
-QLineEdit:focus, QComboBox:focus {
-    border: 1px solid #8bb9ff;
-}
-QTextEdit {
-    background-color: #1e1f22;
-    border: 1px solid #43454a;
-    border-radius: 4px;
-    padding: 5px;
-    color: #a5d6a7; /* Светло-зеленый текст консоли */
-    font-family: 'Consolas', 'Courier New', monospace;
-    font-size: 13px;
-}
-/* Специальные классы кнопок */
-QPushButton#primary_btn {
-    background-color: #3574f0;
-    border: 1px solid #3574f0;
-}
-QPushButton#primary_btn:hover {
-    background-color: #4682f2;
-}
-QPushButton#danger_btn {
-    background-color: #c94f4f;
-    border: 1px solid #c94f4f;
-    color: white;
-}
-QPushButton#danger_btn:hover {
-    background-color: #d65c5c;
-}
-QSplitter::handle {
-    background-color: #43454a;
-    margin: 2px;
-}
-QScrollArea {
-    border: none;
-}
-"""
+def prepare_application(application):
+    # Offscreen Windows sessions may not enumerate system fonts. Load the
+    # existing OS font explicitly; no Microsoft font is redistributed.
+    if not QFontDatabase.families():
+        path = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts/segoeui.ttf"
+        font_id = QFontDatabase.addApplicationFont(str(path))
+        families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+        if not families:
+            raise RuntimeError("No readable system font is available.")
+        application.setFont(QFont(families[0], 10))
 
-# =====================================================================
-# КЛАСС РАБОТЫ С COM-ПОРТОМ
-# =====================================================================
-class SerialWorker(QThread):
-    data_received = pyqtSignal(str)
-    error_occurred = pyqtSignal(str)
 
-    def __init__(self):
-        super().__init__()
-        self.serial_port = None
-        self.running = False
+@dataclass
+class PendingRequest:
+    request_id: int
+    command: str
+    frame: bytes
+    timeout: float
 
-    def connect_port(self, port, baudrate):
-        try:
-            # Создаем объект порта, но пока не открываем
-            self.serial_port = serial.Serial()
-            self.serial_port.port = port
-            self.serial_port.baudrate = baudrate
-            self.serial_port.timeout = 0.1
 
-            # Открываем порт
-            self.serial_port.open()
-
-            # --- АППАРАТНЫЙ СБРОС ESP32 ---
-            # Принудительно перезагружаем плату и выводим из режима прошивки
-            self.serial_port.setDTR(False)
-            self.serial_port.setRTS(True)
-            time.sleep(0.1) # Короткая пауза для сброса
-            self.serial_port.setDTR(False)
-            self.serial_port.setRTS(False)
-            # ------------------------------
-
-            self.running = True
-            self.start()
-            return True
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-            return False
-
-    def disconnect_port(self):
-        self.running = False
-        self.wait()
-        if self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
-
-    def run(self):
-        while self.running and self.serial_port and self.serial_port.is_open:
-            try:
-                if self.serial_port.in_waiting:
-                    data = self.serial_port.read(self.serial_port.in_waiting).decode('utf-8', errors='replace')
-                    if data:
-                        self.data_received.emit(data)
-            except Exception as e:
-                self.error_occurred.emit(f"Ошибка чтения: {str(e)}")
-                self.running = False
-
-    def send_data(self, data):
-        if self.serial_port and self.serial_port.is_open:
-            try:
-                self.serial_port.write((data + '\n').encode('utf-8'))
-            except Exception as e:
-                self.error_occurred.emit(f"Ошибка записи: {str(e)}")
-
-# =====================================================================
-# ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ
-# =====================================================================
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, port_provider=None):
         super().__init__()
-        self.setWindowTitle("TCall Pager Controller - ESP32 PRO")
-        self.resize(1050, 800)
-        self.setStyleSheet(MODERN_STYLE)
-
-        self.worker = SerialWorker()
-        self.worker.data_received.connect(self.append_console)
-        self.worker.error_occurred.connect(self.show_error)
-
-        self.command_queue = []
-        self.queue_timer = QTimer()
-        self.queue_timer.timeout.connect(self.process_queue)
-
-        self.init_ui()
-
-    def init_ui(self):
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        main_layout = QVBoxLayout(main_widget)
-        main_layout.setContentsMargins(15, 15, 15, 15)
-        main_layout.setSpacing(10)
-
-        # Верхняя панель подключения
-        conn_layout = QHBoxLayout()
-        self.port_combo = QComboBox()
-        self.port_combo.setMinimumWidth(150)
+        self.setWindowTitle(f"TCall Pager {VERSION}")
+        self.resize(1050, 760)
+        self.worker = None
+        self._queue = deque()
+        self._pending = None
+        self._deadline = 0.0
+        self._next_id = time.monotonic_ns() % 1000000 + 1
+        self._port_provider = port_provider or serial.tools.list_ports.comports
+        self._ready = False
+        self._closing = False
+        self._build_ui()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(50)
         self.refresh_ports()
+        self._set_ready(False)
 
-        self.btn_refresh = QPushButton("🔄 Обновить")
-        self.btn_refresh.clicked.connect(self.refresh_ports)
+    @staticmethod
+    def _button(label, action, layout):
+        button = QPushButton(label)
+        button.clicked.connect(action)
+        layout.addWidget(button)
+        return button
 
-        self.btn_connect = QPushButton("Подключить")
-        self.btn_connect.setObjectName("primary_btn")
-        self.btn_connect.clicked.connect(self.toggle_connection)
-
-        conn_layout.addWidget(QLabel("COM Порт:"))
-        conn_layout.addWidget(self.port_combo)
-        conn_layout.addWidget(self.btn_refresh)
-        conn_layout.addWidget(self.btn_connect)
-        conn_layout.addStretch()
-        main_layout.addLayout(conn_layout)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_layout.addWidget(splitter)
-
-        # Левая часть - Настройки
-        control_scroll = QScrollArea()
-        control_scroll.setWidgetResizable(True)
-        control_widget = QWidget()
-        control_layout = QVBoxLayout(control_widget)
-        control_layout.setContentsMargins(0, 0, 10, 0)
-        control_layout.setSpacing(15)
-
-        # 1. Логи и память
-        log_group = QGroupBox("📋 Логи и память")
-        log_layout = QVBoxLayout()
-        log_layout.setSpacing(8)
-
-        btn_sms_log = QPushButton("Читать лог SMS (1)")
-        btn_sms_log.clicked.connect(lambda: self.run_macro(['0', '1']))
-
-        btn_call_log = QPushButton("Читать историю звонков (2)")
-        btn_call_log.clicked.connect(lambda: self.run_macro(['0', '2']))
-
-        btn_wipe = QPushButton("⚠️ Форматировать LittleFS и очистить SIM (5)")
-        btn_wipe.setObjectName("danger_btn")
-        btn_wipe.clicked.connect(lambda: self.run_macro(['0', '5']))
-
-        log_layout.addWidget(btn_sms_log)
-        log_layout.addWidget(btn_call_log)
-        log_layout.addWidget(btn_wipe)
-        log_group.setLayout(log_layout)
-        control_layout.addWidget(log_group)
-
-        # 2. Управление GPIO
-        gpio_group = QGroupBox("⚡ Управление GPIO")
-        gpio_layout = QFormLayout()
-        gpio_layout.setVerticalSpacing(10)
-
-        btn_pin_status = QPushButton("📊 Запросить состояние пинов (4)")
-        btn_pin_status.clicked.connect(lambda: self.run_macro(['0', '4']))
-
-        self.pin_combo = QComboBox()
-        self.pin_combo.addItems(["12", "14", "15", "2", "21", "22", "25"])
-
-        self.gpio_action_combo = QComboBox()
-        self.gpio_action_combo.addItems([
-            "Включить постоянно (ON)",
-            "Выключить (OFF)",
-            "Включить на время (Таймер)",
-            "Бесконечный цикл (Работа / Пауза)"
-        ])
-
-        self.in_gpio_t1 = QLineEdit()
-        self.in_gpio_t1.setPlaceholderText("Минуты (например: 5)")
-        self.in_gpio_t1.setEnabled(False)
-
-        self.in_gpio_t2 = QLineEdit()
-        self.in_gpio_t2.setPlaceholderText("Минуты (например: 10)")
-        self.in_gpio_t2.setEnabled(False)
-
-        self.gpio_action_combo.currentIndexChanged.connect(self.update_gpio_ui)
-
-        btn_gpio_send = QPushButton("▶ Отправить команду GPIO")
-        btn_gpio_send.setObjectName("primary_btn")
-        btn_gpio_send.clicked.connect(self.cmd_control_gpio)
-
-        gpio_layout.addRow("", btn_pin_status)
-        gpio_layout.addRow(QLabel("")) # Отступ
-        gpio_layout.addRow("ПИН (PIN):", self.pin_combo)
-        gpio_layout.addRow("Режим работы:", self.gpio_action_combo)
-        gpio_layout.addRow("Время работы (мин):", self.in_gpio_t1)
-        gpio_layout.addRow("Время паузы (мин):", self.in_gpio_t2)
-        gpio_layout.addRow("", btn_gpio_send)
-        gpio_group.setLayout(gpio_layout)
-        control_layout.addWidget(gpio_group)
-
-        # 3. SMS
-        sms_group = QGroupBox("✉️ Отправить SMS (3)")
-        sms_layout = QFormLayout()
-        self.in_sms_num = QLineEdit("+7")
-        self.in_sms_msg = QLineEdit()
-        btn_send_sms = QPushButton("Отправить SMS")
-        btn_send_sms.setObjectName("primary_btn")
-        btn_send_sms.clicked.connect(self.cmd_send_sms)
-
-        sms_layout.addRow("Номер:", self.in_sms_num)
-        sms_layout.addRow("Текст:", self.in_sms_msg)
-        sms_layout.addRow("", btn_send_sms)
-        sms_group.setLayout(sms_layout)
-        control_layout.addWidget(sms_group)
-
-        # 4. Настройки Админа
-        admin_group = QGroupBox("⚙️ Настройки Администратора (6)")
-        admin_layout = QFormLayout()
-        admin_layout.setVerticalSpacing(10)
-
-        self.in_admin_pass = QLineEdit()
-        self.in_admin_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self.in_admin_pass.setPlaceholderText("Текущий пароль для подтверждения")
-
-        self.in_new_num = QLineEdit("+7")
-        btn_set_num = QPushButton("Сохранить новый номер")
-        btn_set_num.clicked.connect(self.cmd_change_admin_num)
-
-        self.in_new_pass = QLineEdit()
-        btn_set_pass = QPushButton("Сохранить новый пароль")
-        btn_set_pass.clicked.connect(self.cmd_change_admin_pass)
-
-        btn_safe_reset = QPushButton("🛑 SAFE RESET (Аварийное откл. всех PIN)")
-        btn_safe_reset.setObjectName("danger_btn")
-        btn_safe_reset.clicked.connect(self.cmd_safe_reset)
-
-        admin_layout.addRow("Ваш пароль:", self.in_admin_pass)
-        admin_layout.addRow(QLabel("")) # Отступ
-        admin_layout.addRow("Новый номер:", self.in_new_num)
-        admin_layout.addRow("", btn_set_num)
-        admin_layout.addRow("Новый пароль:", self.in_new_pass)
-        admin_layout.addRow("", btn_set_pass)
-        admin_layout.addRow(QLabel("")) # Отступ
-        admin_layout.addRow("", btn_safe_reset)
-        admin_group.setLayout(admin_layout)
-        control_layout.addWidget(admin_group)
-
-        control_layout.addStretch()
-        control_scroll.setWidget(control_widget)
-        splitter.addWidget(control_scroll)
-
-        # Правая часть - Терминал
-        console_widget = QWidget()
-        console_layout = QVBoxLayout(console_widget)
-        console_layout.setContentsMargins(10, 0, 0, 0)
-
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        connection = QHBoxLayout()
+        self.ports = QComboBox()
+        connection.addWidget(QLabel("USB port"))
+        connection.addWidget(self.ports)
+        self.refresh_button = self._button("Refresh", self.refresh_ports, connection)
+        self.connect_button = self._button("Connect", self.toggle_connection, connection)
+        self.status = QLabel("Disconnected")
+        connection.addWidget(self.status, 1)
+        root.addLayout(connection)
+        columns = QHBoxLayout()
+        self.controls = QWidget()
+        layout = QVBoxLayout(self.controls)
+        gpio = QGroupBox("Outputs")
+        form = QFormLayout(gpio)
+        self.pin, self.mode = QComboBox(), QComboBox()
+        self.pin.addItems(["12", "14", "15", "2", "21", "22", "25"])
+        self.mode.addItems(["OFF", "ON", "TIMER", "CYCLE"])
+        self.work_minutes, self.pause_minutes = QSpinBox(), QSpinBox()
+        for field in (self.work_minutes, self.pause_minutes):
+            field.setRange(1, 10080)
+            field.setSuffix(" min")
+        for label, field in (("GPIO", self.pin), ("Mode", self.mode),
+                             ("Work duration", self.work_minutes), ("Pause duration", self.pause_minutes)):
+            form.addRow(label, field)
+        button = QPushButton("Apply output setting")
+        button.clicked.connect(self.apply_gpio)
+        form.addRow(button)
+        self.mode.currentTextChanged.connect(self._update_durations)
+        self._update_durations()
+        layout.addWidget(gpio)
+        sms = QGroupBox("Send one SMS")
+        form = QFormLayout(sms)
+        self.sms_number, self.sms_text = QLineEdit(), QLineEdit()
+        self.sms_number.setPlaceholderText("+12345678900")
+        self.sms_text.setMaxLength(70)
+        form.addRow("Destination", self.sms_number)
+        form.addRow("Text (up to 70 BMP characters)", self.sms_text)
+        button = QPushButton("Send SMS")
+        button.clicked.connect(self.send_sms)
+        form.addRow(button)
+        layout.addWidget(sms)
+        admin = QGroupBox("Administration")
+        form = QFormLayout(admin)
+        self.password, self.new_password, self.new_number = QLineEdit(), QLineEdit(), QLineEdit()
+        for field in (self.password, self.new_password):
+            field.setEchoMode(QLineEdit.EchoMode.Password)
+            field.setMaxLength(64)
+        form.addRow("Current password", self.password)
+        form.addRow("New administrator number", self.new_number)
+        button = QPushButton("Change administrator number")
+        button.clicked.connect(self.change_number)
+        form.addRow(button)
+        form.addRow("New password (6–64 characters)", self.new_password)
+        button = QPushButton("Change password")
+        button.clicked.connect(self.change_password)
+        form.addRow(button)
+        buttons = QHBoxLayout()
+        self._button("All outputs OFF", self.safe_reset, buttons)
+        self._button("Clear device logs…", self.clear_logs, buttons)
+        form.addRow(buttons)
+        layout.addWidget(admin)
+        layout.addStretch()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.controls)
+        columns.addWidget(scroll, 1)
+        right = QVBoxLayout()
+        actions = QHBoxLayout()
+        for label, command in (("Status", "STATUS"), ("SMS log", "SMS_LOG"), ("Call log", "CALL_LOG")):
+            self._button(label, lambda checked=False, cmd=command: self.request(cmd), actions)
+        self.read_actions = QWidget()
+        self.read_actions.setLayout(actions)
+        right.addWidget(self.read_actions)
         self.console = QTextEdit()
         self.console.setReadOnly(True)
+        self.console.document().setMaximumBlockCount(1000)
+        right.addWidget(self.console, 1)
+        columns.addLayout(right, 1)
+        root.addLayout(columns, 1)
 
-        input_layout = QHBoxLayout()
-        self.in_console = QLineEdit()
-        self.in_console.setPlaceholderText("Введите команду вручную и нажмите Enter...")
-        self.in_console.returnPressed.connect(self.send_manual_cmd)
+    def log(self, message):
+        self.console.moveCursor(QTextCursor.MoveOperation.End)
+        self.console.insertPlainText(message + "\n")
 
-        btn_manual_send = QPushButton("Отправить")
-        btn_manual_send.clicked.connect(self.send_manual_cmd)
+    def _set_ready(self, ready):
+        self._ready = ready
+        self.controls.setEnabled(ready)
+        self.read_actions.setEnabled(ready)
 
-        btn_clear = QPushButton("Очистить лог")
-        btn_clear.clicked.connect(self.console.clear)
+    def _update_durations(self):
+        self.work_minutes.setEnabled(self.mode.currentText() in {"TIMER", "CYCLE"})
+        self.pause_minutes.setEnabled(self.mode.currentText() == "CYCLE")
 
-        input_layout.addWidget(self.in_console)
-        input_layout.addWidget(btn_manual_send)
-        input_layout.addWidget(btn_clear)
-
-        lbl_terminal = QLabel("💻 Встроенный монитор порта:")
-        lbl_terminal.setStyleSheet("font-weight: bold; color: #8bb9ff; padding-bottom: 5px;")
-
-        console_layout.addWidget(lbl_terminal)
-        console_layout.addWidget(self.console)
-        console_layout.addLayout(input_layout)
-
-        splitter.addWidget(console_widget)
-        splitter.setSizes([500, 500])
-
-    # --- ЛОГИКА ИНТЕРФЕЙСА GPIO ---
-    def update_gpio_ui(self, index):
-        self.in_gpio_t1.setEnabled(index >= 2)
-        self.in_gpio_t2.setEnabled(index == 3)
-        if index < 2:
-            self.in_gpio_t1.clear()
-        if index < 3:
-            self.in_gpio_t2.clear()
-
-    def cmd_control_gpio(self):
-        if not self.worker.running:
-            self.show_error("Сначала подключитесь к COM-порту!")
-            return
-
-        pin = self.pin_combo.currentText()
-        idx = self.gpio_action_combo.currentIndex()
-
-        if idx == 0:
-            cmd = f"PIN {pin} ON"
-        elif idx == 1:
-            cmd = f"PIN {pin} OFF"
-        elif idx == 2:
-            t1 = self.in_gpio_t1.text().strip()
-            if not t1.isdigit():
-                self.show_error("Укажите корректное время работы в минутах (только цифры)!")
-                return
-            cmd = f"PIN {pin} ON {t1}"
-        elif idx == 3:
-            t1 = self.in_gpio_t1.text().strip()
-            t2 = self.in_gpio_t2.text().strip()
-            if not t1.isdigit() or not t2.isdigit():
-                self.show_error("Укажите корректное время работы и паузы в минутах (только цифры)!")
-                return
-            cmd = f"PIN {pin} ON {t1} {t2}"
-
-        self.worker.send_data(cmd)
-        self.append_console(f"\n[GUI] Отправлена команда: {cmd}\n")
-
-    # --- ОСТАЛЬНАЯ ЛОГИКА ---
     def refresh_ports(self):
-        self.port_combo.clear()
-        ports = serial.tools.list_ports.comports()
-        for p in ports:
-            self.port_combo.addItem(p.device)
+        selected = self.ports.currentData()
+        self.ports.clear()
+        for port in self._port_provider():
+            self.ports.addItem(f"{port.device} — {port.description}", port.device)
+        index = self.ports.findData(selected)
+        if index >= 0:
+            self.ports.setCurrentIndex(index)
 
     def toggle_connection(self):
-        if self.worker.running:
-            self.worker.disconnect_port()
-            self.btn_connect.setText("Подключить")
-            self.btn_connect.setObjectName("primary_btn")
-            self.btn_connect.setStyleSheet("") # Сброс кастомного стиля
-            self.port_combo.setEnabled(True)
-            self.btn_refresh.setEnabled(True)
-            self.append_console("\n--- ОТКЛЮЧЕНО ---\n")
-        else:
-            port = self.port_combo.currentText()
-            if not port:
-                self.show_error("COM-порт не найден!")
+        if self.worker is not None:
+            self.disconnect()
+            return
+        port = self.ports.currentData()
+        if not port:
+            self.log("Select a serial port first.")
+            return
+        worker = SerialWorker(port, self)
+        worker.connected.connect(self._connected)
+        worker.line_received.connect(self._line)
+        worker.failed.connect(self._serial_failed)
+        worker.finished.connect(self._finished)
+        self.worker = worker
+        self.ports.setEnabled(False)
+        self.refresh_button.setEnabled(False)
+        self.connect_button.setText("Disconnect")
+        self.status.setText("Opening port…")
+        worker.start()
+
+    def _connected(self):
+        self.status.setText("Checking firmware…")
+        try:
+            self.worker.submit(b"\n")  # Discard an incomplete frame left by an interrupted connection.
+        except Exception as error:
+            self._serial_failed(str(error))
+            return
+        self.request("HELLO", internal=True)
+
+    def disconnect(self):
+        self._set_ready(False)
+        self._queue.clear()
+        self._pending = None
+        self.password.clear()
+        self.new_password.clear()
+        if self.worker is not None:
+            self.worker.stop()
+            self.status.setText("Disconnecting…")
+            self.connect_button.setEnabled(False)
+
+    def _serial_failed(self, error):
+        self.log(error)
+        self.disconnect()
+
+    def _finished(self):
+        worker, self.worker = self.worker, None
+        if worker is not None:
+            worker.deleteLater()
+        self._set_ready(False)
+        self._queue.clear()
+        self._pending = None
+        self.status.setText("Disconnected")
+        self.ports.setEnabled(True)
+        self.refresh_button.setEnabled(True)
+        self.connect_button.setEnabled(True)
+        self.connect_button.setText("Connect")
+        if self._closing:
+            self.close()
+
+    def request(self, command, *arguments, internal=False):
+        if self.worker is None or (not self._ready and not internal):
+            self.log("Connect to compatible firmware first.")
+            return
+        try:
+            if len(self._queue) >= 16:
+                raise ProtocolError("Too many pending commands; wait for the device.")
+            frame = encode_request(self._next_id, command, *arguments)
+        except (ValueError, UnicodeError) as error:
+            self.log(str(error))
+            return
+        self._queue.append(PendingRequest(self._next_id, command, frame, 65 if command == "SEND_SMS" else 10))
+        self._next_id = self._next_id % 2147483647 + 1
+
+    def _tick(self):
+        if self._pending is not None:
+            if time.monotonic() > self._deadline:
+                self.log(f"{self._pending.command}: response timeout; reconnect before retrying.")
+                self.disconnect()
+            return
+        if self.worker is not None and self._queue:
+            request = self._queue.popleft()
+            try:
+                self.worker.submit(request.frame)
+            except Exception as error:
+                self._serial_failed(str(error))
                 return
-            if self.worker.connect_port(port, 115200):
-                self.btn_connect.setText("Отключить")
-                self.btn_connect.setObjectName("danger_btn")
-                self.btn_connect.setStyleSheet("")
-                self.port_combo.setEnabled(False)
-                self.btn_refresh.setEnabled(False)
-                self.append_console(f"\n--- ПОДКЛЮЧЕНО К {port} ---\n")
+            self._pending = request
+            self._deadline = time.monotonic() + request.timeout
+            self.log(f"> {request.command}")
 
-    def append_console(self, text):
-        scrollbar = self.console.verticalScrollBar()
-        at_bottom = scrollbar.value() == scrollbar.maximum()
-        self.console.insertPlainText(text)
-        if at_bottom:
-            scrollbar.setValue(scrollbar.maximum())
-
-    def show_error(self, message):
-        QMessageBox.warning(self, "Внимание", message)
-
-    def send_manual_cmd(self):
-        text = self.in_console.text()
-        if text:
-            self.worker.send_data(text)
-            self.in_console.clear()
-
-    def run_macro(self, commands):
-        if not self.worker.running:
-            self.show_error("Сначала подключитесь к COM-порту!")
+    def _line(self, line):
+        try:
+            response = parse_response(line)
+        except ProtocolError as error:
+            self._serial_failed(str(error))
             return
-        self.command_queue.extend(commands)
-        if not self.queue_timer.isActive():
-            self.queue_timer.start(300)
-
-    def process_queue(self):
-        if self.command_queue:
-            cmd = self.command_queue.pop(0)
-            self.worker.send_data(cmd)
-        else:
-            self.queue_timer.stop()
-
-    def cmd_send_sms(self):
-        num = self.in_sms_num.text().strip()
-        msg = self.in_sms_msg.text().strip()
-        if not num or not msg:
-            self.show_error("Заполните номер телефона и текст сообщения!")
+        if response is None:
+            self.log(line)
             return
-        self.run_macro(['0', '3', num, msg])
-
-    def cmd_change_admin_num(self):
-        pwd = self.in_admin_pass.text().strip()
-        new_num = self.in_new_num.text().strip()
-        if not pwd or not new_num:
-            self.show_error("Для смены номера укажите ваш текущий пароль и новый номер.")
+        if response.status == "EVENT":
+            self.log(response.payload)
             return
-        self.run_macro(['0', '6', pwd, '1', new_num, '0'])
-
-    def cmd_change_admin_pass(self):
-        pwd = self.in_admin_pass.text().strip()
-        new_pwd = self.in_new_pass.text().strip()
-        if not pwd or not new_pwd:
-            self.show_error("Для смены пароля укажите текущий и новый пароль.")
+        if self._pending is None or response.request_id != self._pending.request_id:
+            self.log("Ignored an unmatched device response.")
             return
-        self.run_macro(['0', '6', pwd, '2', new_pwd, '0'])
-
-    def cmd_safe_reset(self):
-        pwd = self.in_admin_pass.text().strip()
-        if not pwd:
-            self.show_error("Операция требует подтверждения! Введите текущий пароль.")
+        command = self._pending.command
+        self._pending = None
+        self.log(f"{command}: {response.status}\n{response.payload}")
+        if response.status == "ERR":
+            self._queue.clear()
+            if command == "HELLO":
+                self.disconnect()
             return
-        self.run_macro(['0', '6', pwd, '3', '0'])
+        if command == "HELLO":
+            if not response.payload.startswith("TCall Pager "):
+                self._serial_failed("The selected device is not a TCall Pager.")
+                return
+            self._set_ready(True)
+            self.status.setText(response.payload)
+            self.request("STATUS")
+        if command in {"SET_PASSWORD", "SET_ADMIN", "CLEAR_LOGS", "SAFE_RESET"}:
+            self.password.clear()
+            self.new_password.clear()
+
+    def apply_gpio(self):
+        mode = self.mode.currentText()
+        self.request("GPIO", self.pin.currentText(), mode,
+                     str(self.work_minutes.value()) if mode in {"TIMER", "CYCLE"} else "0",
+                     str(self.pause_minutes.value()) if mode == "CYCLE" else "0")
+
+    def send_sms(self):
+        try:
+            number, text = validate_phone(self.sms_number.text()), validate_sms(self.sms_text.text())
+        except ProtocolError as error:
+            self.log(str(error))
+            return
+        self.request("SEND_SMS", number, text)
+
+    def change_number(self):
+        try:
+            number = validate_phone(self.new_number.text())
+        except ProtocolError as error:
+            self.log(str(error))
+            return
+        self.request("SET_ADMIN", self.password.text(), number)
+
+    def change_password(self):
+        try:
+            password = validate_password(self.new_password.text())
+        except ProtocolError as error:
+            self.log(str(error))
+            return
+        self.request("SET_PASSWORD", self.password.text(), password)
+
+    def safe_reset(self):
+        self.request("SAFE_RESET", self.password.text())
+
+    def clear_logs(self):
+        question = "Delete device SMS and call logs? Settings and SIM messages will be preserved."
+        if QMessageBox.question(self, "Clear logs", question) == QMessageBox.StandardButton.Yes:
+            self.request("CLEAR_LOGS", self.password.text())
 
     def closeEvent(self, event):
-        self.worker.disconnect_port()
-        event.accept()
+        if self.worker is not None:
+            self._closing = True
+            self.disconnect()
+            event.ignore()
+        else:
+            event.accept()
 
-if __name__ == "__main__":
+
+def main():
     app = QApplication(sys.argv)
+    prepare_application(app)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
