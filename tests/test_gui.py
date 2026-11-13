@@ -65,6 +65,15 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(fields[2], "GPIO")
         self.assertEqual([bytes.fromhex(v).decode() for v in fields[3:]], ["12", "TIMER", "5", "0"])
 
+    def test_older_log_pages_are_accessible(self):
+        self.transport()
+        self.window._set_ready(True)
+        self.window.log_page.setValue(10)
+        self.window.read_status_or_log("SMS_LOG")
+        fields = self.window._queue[0].frame.decode().strip().split("\t")
+        self.assertEqual(fields[2], "SMS_LOG")
+        self.assertEqual(bytes.fromhex(fields[3]).decode(), "45")
+
     def test_failed_request_cancels_remaining_commands(self):
         self.transport()
         self.window._set_ready(True)

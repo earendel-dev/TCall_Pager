@@ -19,6 +19,7 @@ for **LilyGO T-Call v1.3**.
 - Control GPIO 12, 14, 15, 2, 21, 22 and 25: OFF, constant ON, timer or work/pause cycle.
 - Accept output commands from one administrator phone number.
 - Record SMS/call events in LittleFS, retaining at most 50 entries per log.
+- Browse all retained entries through ten log pages, with five entries per page.
 - Read status and recent logs, submit SMS, and manage credentials over USB.
 - Keep USB and output timing available while the modem initializes or waits for replies.
 
@@ -82,6 +83,8 @@ Five failed administrative authentications trigger a 30-second lockout.
 credentials, output settings and SIM messages. Startup and incoming calls do
 not trigger bulk SIM deletion. Incoming SMS is deleted individually after it
 has been logged; storage errors retain the modem copy for later recovery.
+Each stored record is limited to 300 UTF-8 bytes. This fits a normal single-part
+BMP SMS plus its timestamp and sender; longer records are truncated at a character boundary.
 
 The firmware never automatically formats a filesystem that fails to mount.
 For a new, unformatted partition, hold **BOOT after the board has booted**, then:

@@ -136,8 +136,12 @@ class MainWindow(QMainWindow):
         columns.addWidget(scroll, 1)
         right = QVBoxLayout()
         actions = QHBoxLayout()
+        self.log_page = QSpinBox()
+        self.log_page.setRange(1, 10)
+        self.log_page.setPrefix("Page ")
+        actions.addWidget(self.log_page)
         for label, command in (("Status", "STATUS"), ("SMS log", "SMS_LOG"), ("Call log", "CALL_LOG")):
-            self._button(label, lambda checked=False, cmd=command: self.request(cmd), actions)
+            self._button(label, lambda checked=False, cmd=command: self.read_status_or_log(cmd), actions)
         self.read_actions = QWidget()
         self.read_actions.setLayout(actions)
         right.addWidget(self.read_actions)
@@ -299,6 +303,12 @@ class MainWindow(QMainWindow):
         self.request("GPIO", self.pin.currentText(), mode,
                      str(self.work_minutes.value()) if mode in {"TIMER", "CYCLE"} else "0",
                      str(self.pause_minutes.value()) if mode == "CYCLE" else "0")
+
+    def read_status_or_log(self, command):
+        if command in {"SMS_LOG", "CALL_LOG"}:
+            self.request(command, str((self.log_page.value() - 1) * 5))
+        else:
+            self.request(command)
 
     def send_sms(self):
         try:

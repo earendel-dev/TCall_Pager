@@ -24,7 +24,7 @@ only constant-ON channels. Full phone-number matching replaces suffix matching.
 
 ## Verification and limits
 
-23 offline tests pass using native Qt. The frozen desktop self-check exits 0.
+24 offline tests pass using native Qt. The frozen desktop self-check exits 0.
 The candidate passes C++ semantic checking against real ESP32 core 3.3.8 headers.
 A complete firmware build and hardware acceptance tests remain required before
 stable use; see [validation notes](https://github.com/earendel-dev/TCall_Pager/blob/v1.1.0-rc.1/docs/VALIDATION.md).

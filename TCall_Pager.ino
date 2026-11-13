@@ -9,6 +9,7 @@
 // LilyGO T-Call v1.3: GPIO assignments must match the connected relay board.
 constexpr char VERSION[] = "1.1.0-rc.1";
 constexpr int MODEM_RX = 26, MODEM_TX = 27, MODEM_POWER = 23, MODEM_KEY = 4;
+constexpr uint8_t STATUS_LED = 13;
 constexpr uint32_t MAX_MINUTES = 10080;
 constexpr size_t MAX_USB_LINE = 4096;
 constexpr char SETTINGS[] = "/settings.txt";
@@ -32,6 +33,8 @@ uint32_t authLockStarted = 0;
 bool authLocked = false;
 String usbLine;
 bool discardUsbLine = false;
+bool notificationActive = false;
+uint32_t notificationStarted = 0;
 
 class UsbWriter {
  public:
@@ -101,6 +104,8 @@ void reply(uint32_t id, bool ok, const String& payload) {
 }
 
 void event(const String& message) {
+  notificationActive = true;
+  notificationStarted = millis();
   usbWriter.enqueue("TCALL/1\t0\tEVENT\t" + hexEncode(boundedUtf8(message, 1800)));
 }
 
@@ -300,8 +305,8 @@ void loadState() {
 
 String logSafe(String text) {
   text.replace("\r", " "); text.replace("\n", " "); text.replace("\t", " ");
-  if (text.length() > 150) {
-    size_t end = 150;
+  if (text.length() > 300) {
+    size_t end = 300;
     while (end && (uint8_t(text[end]) & 0xC0) == 0x80) --end;
     text = text.substring(0, end);
   }
@@ -330,16 +335,17 @@ bool appendLog(const char* path, const String& text) {
   return atomicWrite(path, content);
 }
 
-String recentLog(const char* path) {
+String recentLog(const char* path, uint32_t offset) {
   File file = LittleFS.open(path, "r");
-  String lines[10]; size_t total = 0;
+  String lines[50]; size_t total = 0;
   while (file && file.available()) {
     String line = file.readStringUntil('\n'); line.trim();
-    if (line.length()) lines[total++ % 10] = logSafe(line);
+    if (line.length()) lines[total++ % 50] = logSafe(line);
   }
-  String content = "Latest 10 entries (maximum 50 retained):\n";
-  size_t start = total > 10 ? total - 10 : 0;
-  for (size_t i = start; i < total; ++i) content += lines[i % 10] + "\n";
+  String content = "Log page, newest first; offset " + String(offset) + ":\n";
+  size_t retained = total > 50 ? 50 : total;
+  if (offset >= retained) return content + "No entries on this page.\n";
+  for (size_t i = 0; i < 5 && offset + i < retained; ++i) content += lines[(total - 1 - offset - i) % 50] + "\n";
   return content;
 }
 
@@ -609,8 +615,10 @@ void handleRequest(const String& line) {
     reply(id, securityReady, securityReady ? "Storage initialized. Change the default credentials." : "Credential initialization failed.");
   }
   else if (command == "STATUS" && count == 3) reply(id, true, statusText());
-  else if ((command == "SMS_LOG" || command == "CALL_LOG") && count == 3) {
-    reply(id, storageReady, storageReady ? recentLog(command == "SMS_LOG" ? SMS_LOG : CALL_LOG) : "Storage unavailable.");
+  else if ((command == "SMS_LOG" || command == "CALL_LOG") && (count == 3 || count == 4)) {
+    uint32_t offset = 0;
+    if (count == 4 && !parseUnsigned(fields[3], 49, offset)) { reply(id, false, "Invalid log offset."); return; }
+    reply(id, storageReady, storageReady ? recentLog(command == "SMS_LOG" ? SMS_LOG : CALL_LOG, offset) : "Storage unavailable.");
   } else if (command == "GPIO" && count == 7) {
     String error;
     bool ok = configureOutput(fields[3], fields[4], fields[5], fields[6], error);
@@ -662,6 +670,7 @@ void handleUsb() {
 
 void setup() {
   Serial.begin(115200);
+  pinMode(STATUS_LED, OUTPUT); digitalWrite(STATUS_LED, LOW);
   pinMode(0, INPUT_PULLUP);
   for (auto& output : outputs) { pinMode(output.pin, OUTPUT); digitalWrite(output.pin, LOW); }
   pinMode(MODEM_POWER, OUTPUT); pinMode(MODEM_KEY, OUTPUT);
@@ -677,6 +686,11 @@ void setup() {
 
 void loop() {
   updateOutputs();
+  if (notificationActive) {
+    uint32_t elapsed = millis() - notificationStarted;
+    notificationActive = elapsed < 3000;
+    digitalWrite(STATUS_LED, notificationActive && (elapsed / 200) % 2 ? HIGH : LOW);
+  }
   usbWriter.tick();
   handleUsb();
   tickModemStartup();

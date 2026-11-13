@@ -12,7 +12,7 @@ The existing release and its assets must remain unchanged.
 - Offline packaging smoke check: protocol round trip and disabled controls before
   a device handshake. This check does not open a physical serial port.
 - Desktop packaging with the installed Python 3.14 / PySide6 6.12 toolchain.
-- 23 offline tests pass; the packaged console twin completes its offline
+- 24 offline tests pass; the packaged console twin completes its offline
   self-check with exit code 0. No compatibility adapter is used for candidate tests.
 - The installed GCC C++ frontend completes semantic checking of the candidate
   with real ESP32 core 3.3.8 headers. The only diagnostic is a toolchain-header

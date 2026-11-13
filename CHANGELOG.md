@@ -16,6 +16,7 @@ and firmware from the same release. The existing v1.0.0 release remains availabl
 - Preserve original credentials when migrating a valid legacy installation.
 - Store new passwords using PBKDF2-HMAC-SHA256 with hardware-generated salts.
 - Add offline protocol/GUI tests, frozen smoke checks and build-only CI jobs.
+- Preserve the event LED and expose all 50 retained log entries through bounded pages.
 
 ### Safety and compatibility
 

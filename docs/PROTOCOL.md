@@ -30,8 +30,8 @@ after an uncertain timeout. A matching response is required to report success.
 | `STATUS` | none | Storage, modem/network status and output states |
 | `GPIO` | pin, mode, work minutes, pause minutes | Persist and apply an output setting |
 | `SEND_SMS` | number, text | Submit one SMS; network delivery is not confirmed |
-| `SMS_LOG` | none | Latest ten retained SMS log entries |
-| `CALL_LOG` | none | Latest ten retained call log entries |
+| `SMS_LOG` | optional entry offset, 0–49 | Five SMS log entries, newest first |
+| `CALL_LOG` | optional entry offset, 0–49 | Five call log entries, newest first |
 | `SET_ADMIN` | current password, new number | Persist administrator number |
 | `SET_PASSWORD` | current password, new password | Persist a new salted password verifier |
 | `SAFE_RESET` | current password | Turn all outputs OFF and save the state |

@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", required=True)
     parser.add_argument("command", choices=["HELLO", "STATUS", "SMS_LOG", "CALL_LOG", "INIT_STORAGE"])
+    parser.add_argument("--page", type=int, choices=range(1, 11), default=1, help="Log page, 1–10")
     args = parser.parse_args()
     request_id = secrets.randbelow(1000000) + 1
     port = serial.Serial(port=None, baudrate=115200, timeout=.2, write_timeout=1)
@@ -22,7 +23,8 @@ def main():
     try:
         port.open()
         port.write(b"\n")
-        port.write(encode_request(request_id, args.command))
+        fields = (str((args.page - 1) * 5),) if args.command in {"SMS_LOG", "CALL_LOG"} else ()
+        port.write(encode_request(request_id, args.command, *fields))
         deadline = time.monotonic() + 10
         pending = bytearray()
         while time.monotonic() < deadline:
