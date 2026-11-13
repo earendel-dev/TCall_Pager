@@ -5,14 +5,31 @@ from pathlib import Path
 import sys
 import time
 import unittest
+import gc
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "GUI"))
 from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtCore import QCoreApplication, QEvent
+from shiboken6 import delete, isValid
 from gui import MainWindow
 from serial_worker import SerialWorker
 
 APP = QApplication.instance() or QApplication([])
+
+
+def dispose_qobject(obj):
+    obj.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def tearDownModule():
+    # Qt must finish destruction while Python and its bindings are still live.
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    if isValid(APP):
+        APP.quit()
+        delete(APP)
 
 
 class GuiTests(unittest.TestCase):
@@ -22,8 +39,9 @@ class GuiTests(unittest.TestCase):
 
     def tearDown(self):
         self.window.worker = None
+        self.window._timer.stop()
         self.window.close()
-        APP.processEvents()
+        dispose_qobject(self.window)
 
     def transport(self):
         self.window.worker = Mock()
@@ -127,6 +145,7 @@ class GuiTests(unittest.TestCase):
 class WorkerTests(unittest.TestCase):
     def test_factory_failure_is_reported(self):
         worker = SerialWorker("fake", serial_factory=Mock(side_effect=OSError("unavailable")))
+        self.addCleanup(dispose_qobject, worker)
         errors = []
         worker.failed.connect(errors.append)
         worker.run()
@@ -149,6 +168,7 @@ class WorkerTests(unittest.TestCase):
                 self.closed = True
         port = FakePort()
         worker = SerialWorker("fake", serial_factory=Mock(return_value=port))
+        self.addCleanup(dispose_qobject, worker)
         lines = []
         worker.line_received.connect(lines.append)
         worker.run()

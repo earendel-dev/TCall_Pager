@@ -25,9 +25,9 @@ only constant-ON channels. Full phone-number matching replaces suffix matching.
 ## Verification and limits
 
 24 offline tests pass using native Qt. The frozen desktop self-check exits 0.
-The candidate passes C++ semantic checking against real ESP32 core 3.3.8 headers.
-A complete firmware build and hardware acceptance tests remain required before
-stable use; see [validation notes](https://github.com/earendel-dev/TCall_Pager/blob/v1.1.0-rc.1/docs/VALIDATION.md).
+The firmware also compiles and links in GitHub Actions using ESP32 core 3.3.8.
+The release includes the resulting firmware binaries. Hardware acceptance tests
+remain required before stable use; see [validation notes](https://github.com/earendel-dev/TCall_Pager/blob/v1.1.0-rc.1/docs/VALIDATION.md).
 
 No device was flashed during local preparation because COM7 could not be opened.
 Do not infer recipient SMS delivery from a modem submission acknowledgement.
