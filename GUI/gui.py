@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 import os
 import serial.tools.list_ports
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QCoreApplication, QEvent
 from PySide6.QtGui import QTextCursor, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
@@ -346,7 +346,11 @@ def main():
     prepare_application(app)
     window = MainWindow()
     window.show()
-    return app.exec()
+    result = app.exec()
+    window._timer.stop()
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    return result
 
 
 if __name__ == "__main__":

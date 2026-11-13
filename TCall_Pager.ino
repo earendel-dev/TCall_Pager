@@ -286,6 +286,8 @@ void loadState() {
   }
   securityReady = validPhone(adminNumber) && passwordSalt.length() >= 16 &&
       (passwordHash.length() == 64 || (passwordHash.startsWith("pbkdf2:") && passwordHash.length() == 71));
+  String hashBody = passwordHash.startsWith("pbkdf2:") ? passwordHash.substring(7) : passwordHash;
+  for (size_t i = 0; i < hashBody.length(); ++i) if (hexDigit(hashBody[i]) < 0) securityReady = false;
   if (!securityReady) return;
   File file = LittleFS.open("/pins_state.txt", "r");
   if (!file) return;
